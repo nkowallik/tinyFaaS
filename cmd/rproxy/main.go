@@ -7,9 +7,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/pprof"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/coap"
 	"github.com/OpenFogStack/tinyFaaS/pkg/fastcoap"
@@ -163,6 +166,7 @@ func main() {
 			log.Printf("%s", err)
 		}
 	}()
+	go cpuWatcher()
 
 	s := make(chan os.Signal, 1)
 
@@ -172,4 +176,30 @@ func main() {
 
 	log.Printf("exiting")
 	return
+}
+
+func cpuWatcher() {
+	var count = 0
+	for {
+		cmd := exec.Command("./get_cpu_usage.sh")
+		out, err := cmd.Output()
+		if err != nil {
+			log.Fatal(err)
+		}
+		usage, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 32)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("Usage: %f", usage)
+		if usage >= 80.0 {
+			// TODO: start new node
+			count = 0
+		} else if count >= 3 && usage < 80.0 {
+			// TODO: shutdown another node
+			count = 0
+		} else {
+			count += 1
+		}
+		time.Sleep(10 * time.Second) // TODO: adapt sleep time
+	}
 }

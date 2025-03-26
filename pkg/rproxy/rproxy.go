@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"regexp"
@@ -148,37 +147,39 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 
 	// log.Printf("have handlers: %s", handler)
 
-	// choose random handler
 	r.hl.Lock()
 	defer r.hl.Unlock()
 
+	// TODO: if connection fails, remove handler after some time and retry with another one
 	if _, keyInMap := r.hosts[name]; !keyInMap {
 		r.status[name] = -1
 	}
-	r.status[name] = (r.status[name] + 1) % len(r.hosts[name])
-	h := handler[r.status["name"]]
+	var resp = &fasthttp.Response{}
+	for {
+		r.status[name] = (r.status[name] + 1) % len(r.hosts[name])
+		h := handler[r.status["name"]]
 
-	log.Printf("chosen handler: %s", h)
+		log.Printf("chosen handler: %s", h)
+		req := &fasthttp.Request{}
+		req.SetRequestURI(h)
+		req.Header.SetMethod(fasthttp.MethodPost)
+		req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
+		req.SetBodyRaw(payload)
 
-	// req := fasthttp.AcquireRequest()
-	req := &fasthttp.Request{}
-	req.SetRequestURI(h)
-	req.Header.SetMethod(fasthttp.MethodPost)
-	req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
-	req.SetBodyRaw(payload)
+		resp = &fasthttp.Response{}
 
-	// resp := fasthttp.AcquireResponse()
-	resp := &fasthttp.Response{}
+		err := r.c.DoTimeout(req, resp, 100*time.Second)
 
-	err := r.c.DoTimeout(req, resp, 100*time.Second)
-	// fasthttp.ReleaseRequest(req)
-	// defer fasthttp.ReleaseResponse(resp)
-
-	if err != nil {
-		log.Print(err)
-		return StatusError, nil
+		if err != nil {
+			if len(r.hosts[name]) < 1 {
+				log.Print(err)
+				return StatusError, nil
+			}
+			r.hosts[name] = append(r.hosts[name][:r.status[name]], r.hosts[name][r.status[name]+1:]...)
+			continue
+		}
+		break
 	}
-
 	statusCode := resp.StatusCode()
 	respBody := resp.Body()
 
@@ -203,10 +204,16 @@ func (r *RProxy) normalCall(name string, payload []byte, async bool, headers map
 
 	// log.Printf("have handlers: %s", handler)
 
-	// choose random handler
-	h := handler[rand.Intn(len(handler))]
+	r.hl.Lock()
+	defer r.hl.Unlock()
 
-	// log.Printf("chosen handler: %s", h)
+	if _, keyInMap := r.hosts[name]; !keyInMap {
+		r.status[name] = -1
+	}
+	r.status[name] = (r.status[name] + 1) % len(r.hosts[name])
+	h := handler[r.status["name"]]
+
+	log.Printf("chosen handler: %s", h)
 
 	req, err := http.NewRequest("POST", h, bytes.NewBuffer(payload))
 

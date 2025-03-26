@@ -2,10 +2,12 @@ package rproxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"regexp"
 	"sync"
@@ -61,6 +63,65 @@ func (r *RProxy) Add(name string, ips []string) error {
 	}
 	r.hosts[name] = ips
 
+	return nil
+}
+
+func (r *RProxy) AddInstance(ip string, body []byte) error {
+	if ip == "" {
+		return fmt.Errorf("no empty instances")
+	}
+
+	r.hl.Lock()
+	defer r.hl.Unlock()
+	var connections = make(map[string][]string)
+	err := json.Unmarshal(body, &connections)
+	if err != nil {
+		return fmt.Errorf("unable to unmarshal body")
+	}
+	log.Println(connections)
+	for name, values := range connections {
+		if _, isMapContainsKey := r.hosts[name]; !isMapContainsKey {
+			r.hosts[name] = make([]string, 0)
+		}
+		r.hosts[name] = append(r.hosts[name], values...) // TODO: add the number of running instances remotely here
+	}
+	log.Println(r.hosts)
+	return nil
+}
+
+func GetOutboundIP() net.IP {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+
+	return localAddr.IP
+}
+
+func (r *RProxy) RegisterInCluster(addr string) error {
+	log.Println(addr)
+	jsonStr, err := json.Marshal(r.hosts)
+	if err != nil {
+		log.Fatal(err)
+		return fmt.Errorf("unable to marshal function register")
+	}
+	req, err := http.NewRequest("POST", addr, bytes.NewBuffer(jsonStr))
+	if err != nil {
+		log.Fatal(err)
+		return fmt.Errorf("unable to perform post request")
+	}
+	req.Header.Set("X-tinyFaaS-register", GetOutboundIP().String())
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
 	return nil
 }
 

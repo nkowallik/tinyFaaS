@@ -31,6 +31,19 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 			return
 		}
 
+		if req.Header.Get("X-tinyFaaS-register") != "" {
+			log.Printf("Registering: %s", req.Header.Get("X-tinyFaaS-register"))
+			r.AddInstance(req.Header.Get("X-tinyFaaS-register"), req_body)
+			return
+		}
+
+		var joincluster = req.Header.Get("X-tinyFaaS-joincluster")
+		if joincluster != "" {
+			log.Printf("Joining cluster: %s", joincluster)
+			r.RegisterInCluster(joincluster)
+			return
+		}
+
 		headers := make(map[string]string)
 		for k, v := range req.Header {
 			headers[k] = v[0]

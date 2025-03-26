@@ -26,9 +26,10 @@ const (
 )
 
 type RProxy struct {
-	hosts map[string][]string
-	c     *fasthttp.Client
-	hl    sync.RWMutex
+	hosts  map[string][]string
+	c      *fasthttp.Client
+	hl     sync.RWMutex
+	status map[string]int
 }
 
 func New() *RProxy {
@@ -80,12 +81,11 @@ func (r *RProxy) AddInstance(ip string, body []byte) error {
 	}
 	log.Println(connections)
 	for name, values := range connections {
-		if _, isMapContainsKey := r.hosts[name]; !isMapContainsKey {
+		if _, keyInMap := r.hosts[name]; !keyInMap {
 			r.hosts[name] = make([]string, 0)
 		}
-		r.hosts[name] = append(r.hosts[name], values...) // TODO: add the number of running instances remotely here
+		r.hosts[name] = append(r.hosts[name], values...)
 	}
-	log.Println(r.hosts)
 	return nil
 }
 
@@ -149,9 +149,16 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 	// log.Printf("have handlers: %s", handler)
 
 	// choose random handler
-	h := handler[rand.Intn(len(handler))]
+	r.hl.Lock()
+	defer r.hl.Unlock()
 
-	// log.Printf("chosen handler: %s", h)
+	if _, keyInMap := r.hosts[name]; !keyInMap {
+		r.status[name] = -1
+	}
+	r.status[name] = (r.status[name] + 1) % len(r.hosts[name])
+	h := handler[r.status["name"]]
+
+	log.Printf("chosen handler: %s", h)
 
 	// req := fasthttp.AcquireRequest()
 	req := &fasthttp.Request{}

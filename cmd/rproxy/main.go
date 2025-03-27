@@ -193,9 +193,21 @@ func cpuWatcher() {
 		log.Printf("Usage: %f", usage)
 		if usage >= 80.0 {
 			// TODO: start new node
+			cmd := exec.Command("./start_node.sh")
+			out, err := cmd.Output()
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println(string(out))
 			count = 0
 		} else if count >= 3 && usage < 80.0 {
 			// TODO: shutdown another node
+			cmd := exec.Command("./stop_node.sh")
+			out, err := cmd.Output()
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println(string(out))
 			count = 0
 		} else {
 			count += 1

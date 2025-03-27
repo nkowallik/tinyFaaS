@@ -102,7 +102,15 @@ func GetOutboundIP() net.IP {
 
 func (r *RProxy) RegisterInCluster(addr string) error {
 	log.Println(addr)
-	jsonStr, err := json.Marshal(r.hosts)
+	outboundIp := GetOutboundIP().String()
+	tmp := make(map[string][]string)
+	for k, v := range r.hosts {
+		tmp[k] = make([]string, 0)
+		for range v {
+			tmp[k] = append(tmp[k], fmt.Sprintf("http://%s:8000/%s", outboundIp, k))
+		}
+	}
+	jsonStr, err := json.Marshal(tmp)
 	if err != nil {
 		log.Fatal(err)
 		return fmt.Errorf("unable to marshal function register")
@@ -112,7 +120,7 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 		log.Fatal(err)
 		return fmt.Errorf("unable to perform post request")
 	}
-	req.Header.Set("X-tinyFaaS-register", GetOutboundIP().String())
+	req.Header.Set("X-tinyFaaS-register", outboundIp)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
@@ -150,17 +158,18 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 	r.hl.Lock()
 	defer r.hl.Unlock()
 
-	// TODO: if connection fails, remove handler after some time and retry with another one
 	if _, keyInMap := r.hosts[name]; !keyInMap {
 		r.status[name] = -1
 	}
 	var resp = &fasthttp.Response{}
+	r.status[name] = (r.status[name] + 1) % len(r.hosts[name])
 	for {
-		r.status[name] = (r.status[name] + 1) % len(r.hosts[name])
 		h := handler[r.status["name"]]
 
 		log.Printf("chosen handler: %s", h)
+
 		req := &fasthttp.Request{}
+
 		req.SetRequestURI(h)
 		req.Header.SetMethod(fasthttp.MethodPost)
 		req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
@@ -176,6 +185,7 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 				return StatusError, nil
 			}
 			r.hosts[name] = append(r.hosts[name][:r.status[name]], r.hosts[name][r.status[name]+1:]...)
+			r.status[name] = r.status[name] % len(r.hosts[name])
 			continue
 		}
 		break

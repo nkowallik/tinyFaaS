@@ -19,6 +19,7 @@ import (
 	"github.com/OpenFogStack/tinyFaaS/pkg/grpc"
 	tfhttp "github.com/OpenFogStack/tinyFaaS/pkg/http"
 	"github.com/OpenFogStack/tinyFaaS/pkg/rproxy"
+	"github.com/OpenFogStack/tinyFaaS/pkg/util"
 )
 
 func main() {
@@ -117,8 +118,8 @@ func main() {
 		log.Printf("have body: %s", newStr)
 
 		var def struct {
-			FunctionResource   string   `json:"name"`
-			FunctionContainers []string `json:"ips"`
+			FunctionResource   string           `json:"name"`
+			FunctionContainers []util.IpWrapper `json:"ips"`
 		}
 
 		err := json.Unmarshal([]byte(newStr), &def)
@@ -157,6 +158,29 @@ func main() {
 			}
 		}
 	})
+	ticker := time.NewTicker(5 * time.Second)
+	quit := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				for _, fis := range r.Hosts {
+					for _, fi := range fis {
+						if !fi.InUse && time.Since(fi.LastUsed) > 30000 { // TODO: make this keep-alive configurable
+							fi.Mu.Lock()
+							fi.InUse = true
+							fi.DestroyMe = true
+							// TODO: remove this function instance
+						}
+					}
+				}
+				r.RemoveIdleInstances()
+			case <-quit:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
 
 	go func() {
 		log.Printf("listening on %s", rproxyListenAddress)

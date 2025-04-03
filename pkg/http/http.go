@@ -33,7 +33,7 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 
 		if req.Header.Get("X-tinyFaaS-register") != "" {
 			log.Printf("Registering: %s", req.Header.Get("X-tinyFaaS-register"))
-			r.AddInstance(req.Header.Get("X-tinyFaaS-register"), req_body)
+			r.AddTFInstance(req.Header.Get("X-tinyFaaS-register"), req_body)
 			return
 		}
 

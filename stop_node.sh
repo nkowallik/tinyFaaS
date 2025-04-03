@@ -1,3 +1,3 @@
 #!/bin/bash
-echo "TODO: Implement choosing node to stop\n"
-echo "TODO: Implement stopping node\n"
+echo "TODO: Implement root choosing node to stop\n"
+echo "TODO: Implement root stopping node\n"

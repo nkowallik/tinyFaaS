@@ -37,7 +37,7 @@ type Backend interface {
 }
 
 type Handler interface {
-	IPs() []string
+	IPs() []util.IpWrapper
 	Start() error
 	Destroy() error
 	Logs() (io.Reader, error)
@@ -57,6 +57,7 @@ func New(id string, rproxyListenAddress string, rproxyPort map[string]int, rprox
 	return ms
 }
 
+// TODO: maybe think about implementing appendFunction() - deploys remembered function containers, if they are known to the system
 func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string) (string, error) {
 
 	// only allow alphanumeric characters
@@ -98,7 +99,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		return "", err
 	}
 
-	defer func() {
+	defer func() { // TODO: copy it into an archive like structure first
 		// remove folder
 		err = os.RemoveAll(p)
 		if err != nil {
@@ -148,8 +149,8 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	// tell rproxy about the new function
 	// curl -X POST http://localhost:80/add -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
 	d := struct {
-		FunctionName string   `json:"name"`
-		FunctionIPs  []string `json:"ips"`
+		FunctionName string           `json:"name"`
+		FunctionIPs  []util.IpWrapper `json:"ips"`
 	}{
 		FunctionName: name,
 		FunctionIPs:  fh.IPs(),
@@ -232,6 +233,7 @@ func (ms *ManagementService) Wipe() error {
 
 	return nil
 }
+
 func (ms *ManagementService) Delete(name string) error {
 
 	fh, ok := ms.functionHandlers[name]

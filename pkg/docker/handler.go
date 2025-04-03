@@ -32,15 +32,14 @@ const (
 )
 
 type dockerHandler struct {
-	name       string
-	env        string
-	threads    int
-	uniqueName string
-	filePath   string
-	client     *client.Client
-	network    string
-	containers []string
-	handlerIPs []string
+	name         string
+	env          string
+	uniqueName   string
+	filePath     string
+	client       *client.Client
+	network      string
+	functionsMux sync.Mutex
+	functions    map[string]string
 }
 
 type DockerBackend struct {
@@ -66,7 +65,7 @@ func (db *DockerBackend) Stop() error {
 	return nil
 }
 
-func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string) (manager.Handler, error) {
+func (db *DockerBackend) BuildImage(name string, env string, filedir string) (manager.Handler, error) {
 
 	// make a unique function name by appending uuid string to function name
 	uuid, err := uuid.NewRandom()
@@ -75,12 +74,12 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 	}
 
 	dh := &dockerHandler{
-		name:       name,
-		env:        env,
-		client:     db.client,
-		threads:    threads,
-		containers: make([]string, 0, threads),
-		handlerIPs: make([]string, 0, threads),
+		name:      name,
+		env:       env,
+		client:    db.client,
+		functions: make(map[string]string),
+		//containers: make([]string, 0),
+		//handlerIPs: make([]string, 0),
 	}
 
 	dh.uniqueName = name + "-" + uuid.String()
@@ -150,6 +149,19 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 
 	log.Println("built image", dh.uniqueName)
 
+	// remove folder
+	// rm -rf <folder>
+	err = os.RemoveAll(dh.filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Println("removed folder", dh.filePath)
+
+	return dh, nil
+}
+
+func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string) error {
 	// create network
 	// docker network create <network>
 	network, err := db.client.NetworkCreate(
@@ -163,7 +175,7 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		},
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	dh.network = network.ID
@@ -178,49 +190,87 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 
 	// create containers
 	// docker run -d --network <network> --name <container> <image>
-	for i := 0; i < dh.threads; i++ {
-		container, err := db.client.ContainerCreate(
-			context.Background(),
-			&container.Config{
-				Image: dh.uniqueName,
-				Labels: map[string]string{
-					"tinyfaas-function": dh.name,
-					"tinyFaaS":          db.tinyFaaSID,
-				},
-				Env: e,
+	dh.functionsMux.Lock()
+	defer dh.functionsMux.Unlock()
+	uniqueContainerName := dh.uniqueName + fmt.Sprintf("-%d", len(dh.functions))
+
+	container, err := db.client.ContainerCreate(
+		context.Background(),
+		&container.Config{
+			Image: dh.uniqueName,
+			Labels: map[string]string{
+				"tinyfaas-function": dh.name,
+				"tinyFaaS":          db.tinyFaaSID,
 			},
-			&container.HostConfig{
-				NetworkMode: container.NetworkMode(dh.uniqueName),
-			},
-			nil,
-			nil,
-			dh.uniqueName+fmt.Sprintf("-%d", i),
-		)
+			Env: e,
+		},
+		&container.HostConfig{
+			NetworkMode: container.NetworkMode(dh.uniqueName),
+		},
+		nil,
+		nil,
+		uniqueContainerName,
+	)
 
-		if err != nil {
-			return nil, err
-		}
-
-		log.Println("created container", container.ID)
-
-		dh.containers = append(dh.containers, container.ID)
+	if err != nil {
+		return err
 	}
+
+	log.Println("created container", container.ID)
+
+	//dh.containers = append(dh.containers, container.ID)
+	dh.functions[container.ID] = ""
 
 	// remove folder
 	// rm -rf <folder>
 	err = os.RemoveAll(dh.filePath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	log.Println("removed folder", dh.filePath)
-
-	return dh, nil
-
+	return nil
 }
 
-func (dh *dockerHandler) IPs() []string {
-	return dh.handlerIPs
+func (db *DockerBackend) KillContainer(id string) {
+	err := db.client.ContainerStop(context.Background(), id, container.StopOptions{})
+	if err != nil {
+		log.Println(err)
+	}
+
+	err = db.client.ContainerRemove(context.Background(), id, container.RemoveOptions{
+		Force:         true,
+		RemoveVolumes: true,
+	})
+	if err != nil {
+		log.Println(err)
+	}
+	log.Printf("Destroyed fn container %s", id)
+}
+
+func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string) (manager.Handler, error) {
+	dh, err := db.BuildImage(name, env, filedir)
+	if err != nil {
+		log.Fatal("Unable to build image", err)
+	}
+	if dh == nil {
+		log.Fatal("NIL in return value")
+	}
+	log.Println(dh)
+	err = db.SpawnFunction(dh.(*dockerHandler), envs)
+	if err != nil {
+		log.Fatal("Unable to spawn function instance", err)
+	}
+	log.Println(dh)
+	return dh, nil
+}
+
+func (dh *dockerHandler) IPs() []util.IpWrapper {
+	ips := make([]util.IpWrapper, 0)
+	for k, v := range dh.functions {
+		ips = append(ips, util.IpWrapper{Ip: v, Cid: k})
+	}
+	return ips
 }
 
 func (dh *dockerHandler) Start() error {
@@ -230,7 +280,7 @@ func (dh *dockerHandler) Start() error {
 	// docker start <container>
 
 	wg := sync.WaitGroup{}
-	for _, c := range dh.containers {
+	for c, _ := range dh.functions {
 		wg.Add(1)
 		go func(c string) {
 			err := dh.client.ContainerStart(
@@ -251,7 +301,7 @@ func (dh *dockerHandler) Start() error {
 
 	// get container IPs
 	// docker inspect <container>
-	for _, container := range dh.containers {
+	for container, _ := range dh.functions {
 		c, err := dh.client.ContainerInspect(
 			context.Background(),
 			container,
@@ -260,14 +310,16 @@ func (dh *dockerHandler) Start() error {
 			return err
 		}
 
-		dh.handlerIPs = append(dh.handlerIPs, c.NetworkSettings.Networks[dh.uniqueName].IPAddress)
+		dh.functions[container] = c.NetworkSettings.Networks[dh.uniqueName].IPAddress
+		//dh.handlerIPs = append(dh.handlerIPs, c.NetworkSettings.Networks[dh.uniqueName].IPAddress)
 
 		log.Println("got ip", c.NetworkSettings.Networks[dh.uniqueName].IPAddress, "for container", container)
+		return nil
 	}
 
 	// wait for the containers to be ready
 	// curl http://<container>:8000/ready
-	for i, ip := range dh.handlerIPs {
+	for cid, ip := range dh.functions {
 		log.Println("waiting for container", ip, "to be ready")
 		maxRetries := 10
 		for {
@@ -275,9 +327,9 @@ func (dh *dockerHandler) Start() error {
 			if maxRetries == 0 {
 				// container did not start properly!
 				// give people some logs to look at
-				log.Printf("container %s (ip %s) not ready after 10 retries", dh.containers[i], ip)
-				log.Printf("getting logs for container %s", dh.containers[i])
-				logs, err := dh.getContainerLogs(dh.containers[i])
+				log.Printf("container %s (ip %s) not ready after 10 retries", cid, ip)
+				log.Printf("getting logs for container %s", cid)
+				logs, err := dh.getContainerLogs(cid)
 
 				if err != nil {
 					return fmt.Errorf("container %s not ready after 10 retries, error encountered when getting logs %s", ip, err)
@@ -285,7 +337,7 @@ func (dh *dockerHandler) Start() error {
 
 				log.Println(logs)
 
-				log.Printf("end of logs for container %s", dh.containers[i])
+				log.Printf("end of logs for container %s", cid)
 
 				return fmt.Errorf("container %s not ready after 10 retries", ip)
 			}
@@ -320,8 +372,8 @@ func (dh *dockerHandler) Destroy() error {
 	log.Printf("dh: %+v", dh)
 
 	wg := sync.WaitGroup{}
-	log.Printf("stopping containers: %v", dh.containers)
-	for _, c := range dh.containers {
+	//log.Printf("stopping containers: %v", dh.containers)
+	for c, _ := range dh.functions {
 		log.Println("removing container", c)
 
 		wg.Add(1)
@@ -445,7 +497,7 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 	// docker logs <container>
 	var logs bytes.Buffer
 
-	for _, c := range dh.containers {
+	for c, _ := range dh.functions {
 		l, err := dh.getContainerLogs(c)
 		if err != nil {
 			return nil, err

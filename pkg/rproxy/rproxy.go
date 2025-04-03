@@ -26,12 +26,11 @@ const (
 )
 
 type FunctionInstance struct {
-	address   string
-	Cid       string
-	InUse     bool
-	LastUsed  time.Time
-	DestroyMe bool
-	Mu        *sync.Mutex
+	address  string
+	Cid      string
+	InUse    bool
+	LastUsed time.Time
+	Mu       *sync.Mutex
 }
 
 type RProxy struct {
@@ -73,7 +72,7 @@ func (r *RProxy) Add(name string, ips []util.IpWrapper) error {
 	}
 	fns := make([]FunctionInstance, 0)
 	for _, ip := range ips {
-		fns = append(fns, FunctionInstance{address: ip.Ip, Cid: ip.Cid, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}, DestroyMe: false})
+		fns = append(fns, FunctionInstance{address: ip.Ip, Cid: ip.Cid, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}})
 	}
 	r.Hosts[name] = fns
 
@@ -99,7 +98,7 @@ func (r *RProxy) AddTFInstance(ip string, body []byte) error {
 		}
 		fns := make([]FunctionInstance, 0)
 		for _, val := range values {
-			fns = append(fns, FunctionInstance{address: val, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}, DestroyMe: false})
+			fns = append(fns, FunctionInstance{address: val, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}})
 		}
 		r.Hosts[name] = append(r.Hosts[name], fns...)
 	}
@@ -161,15 +160,39 @@ func (r *RProxy) Del(name string) error {
 	return nil
 }
 
-func (r *RProxy) RemoveIdleInstances() error {
-	for _, v := range r.Hosts {
-		for _, fn := range v {
-			if fn.DestroyMe {
-				// TODO: remove this function
-			}
-		}
+func spawnAndExecute(name string, payload []byte, headers map[string]string) {
+	tmp := struct {
+		Name    string            `json:"name"`
+		Envs    map[string]string `json:"envs"`
+		Payload []byte            `json:"payload"`
+	}{
+		Name:    name,
+		Envs:    headers,
+		Payload: payload,
 	}
-	return nil
+	jsonStr, err := json.Marshal(tmp)
+	if err != nil {
+		log.Fatal(err)
+		//return fmt.Errorf("unable to marshal function register")
+	}
+	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/coldstart", "127.0.0.1"), bytes.NewBuffer(jsonStr))
+	if err != nil {
+		log.Fatal(err)
+		//return fmt.Errorf("unable to perform post request")
+	}
+	//req.Header.Set("X-tinyFaaS-register", outboundIp)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	// TODO: spawn new function via manager (POST to <manager>/coldstart)
+	// TODO: use spawned function to run request (cold-start) (forward to newly created function container)
+	// TODO: register function in TF to allow processing of other requests (release lock on function container)
+
 }
 
 func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[string]string) (Status, []byte) {
@@ -180,8 +203,6 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 		log.Printf("function not found: %s", name)
 		return StatusNotFound, nil
 	}
-
-	// log.Printf("have handlers: %s", handler)
 
 	r.hl.Lock()
 	defer r.hl.Unlock()
@@ -195,7 +216,17 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 		handler[r.status["name"]].Mu.Lock()
 		defer handler[r.status["name"]].Mu.Unlock()
 		handler[r.status["name"]].InUse = true
-		h := handler[r.status["name"]] // TODO: only chose handlers that are not processing stuff right now, otherwise start a new container and handle this request
+		h := handler[0]
+		for i, hcand := range handler {
+			if !hcand.InUse {
+				hcand.InUse = true
+				h = hcand
+				break
+			}
+			if i == len(handler)-1 {
+				spawnAndExecute(name, payload, headers)
+			}
+		}
 
 		log.Printf("chosen handler: %s", h.address)
 

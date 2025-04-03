@@ -169,6 +169,7 @@ func main() {
 	r.HandleFunc("/wipe", s.wipeHandler)
 	r.HandleFunc("/logs", s.logsHandler)
 	r.HandleFunc("/uploadURL", s.urlUploadHandler)
+	r.HandleFunc("/coldstart", s.coldStartHandler)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
@@ -369,6 +370,39 @@ func (s *server) logsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
+}
+
+func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// parse request
+	d := struct {
+		Name    string            `json:"name"`
+		Envs    map[string]string `json:"envs"`
+		Payload []byte            `json:"payload"`
+	}{}
+
+	err := json.NewDecoder(r.Body).Decode(&d)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		log.Println(err)
+		return
+	}
+
+	log.Println("got request for cold start:", d)
+
+	ip, dh, err := s.ms.NewFunctionInstance(d.Name, d.Envs) // TODO: Get new function instance from here
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+	log.Println(ip)
+	log.Println(dh)
+	// TODO: Use new function instance for execution, set instance free
 }
 
 func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {

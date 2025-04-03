@@ -169,12 +169,11 @@ func main() {
 						if !fi.InUse && time.Since(fi.LastUsed) > 30000 { // TODO: make this keep-alive configurable
 							fi.Mu.Lock()
 							fi.InUse = true
-							fi.DestroyMe = true
+							log.Printf("Removing container %s", fi.Cid)
 							// TODO: remove this function instance
 						}
 					}
 				}
-				r.RemoveIdleInstances()
 			case <-quit:
 				ticker.Stop()
 				return

@@ -161,26 +161,28 @@ func (db *DockerBackend) BuildImage(name string, env string, filedir string) (ma
 	return dh, nil
 }
 
-func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string) error {
+func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string) (string, error) {
 	// create network
 	// docker network create <network>
-	network, err := db.client.NetworkCreate(
-		context.Background(),
-		dh.uniqueName,
-		network.CreateOptions{
-			Labels: map[string]string{
-				"tinyfaas-function": dh.name,
-				"tinyFaaS":          db.tinyFaaSID,
+	if dh.network == "" {
+		network, err := db.client.NetworkCreate(
+			context.Background(),
+			dh.uniqueName,
+			network.CreateOptions{
+				Labels: map[string]string{
+					"tinyfaas-function": dh.name,
+					"tinyFaaS":          db.tinyFaaSID,
+				},
 			},
-		},
-	)
-	if err != nil {
-		return err
+		)
+		if err != nil {
+			return "", err
+		}
+
+		dh.network = network.ID
+
+		log.Println("created network", dh.uniqueName, "with id", network.ID)
 	}
-
-	dh.network = network.ID
-
-	log.Println("created network", dh.uniqueName, "with id", network.ID)
 
 	e := make([]string, 0, len(envs))
 
@@ -213,7 +215,7 @@ func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string
 	)
 
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	log.Println("created container", container.ID)
@@ -223,13 +225,16 @@ func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string
 
 	// remove folder
 	// rm -rf <folder>
-	err = os.RemoveAll(dh.filePath)
-	if err != nil {
-		return err
-	}
+	if dh.filePath != "" {
+		err = os.RemoveAll(dh.filePath)
+		if err != nil {
+			return "", err
+		}
 
-	log.Println("removed folder", dh.filePath)
-	return nil
+		log.Println("removed folder", dh.filePath)
+		dh.filePath = ""
+	}
+	return container.ID, nil
 }
 
 func (db *DockerBackend) KillContainer(id string) {
@@ -248,7 +253,38 @@ func (db *DockerBackend) KillContainer(id string) {
 	log.Printf("Destroyed fn container %s", id)
 }
 
-func (db *DockerBackend) Create(name string, env string, threads int, filedir string, envs map[string]string) (manager.Handler, error) {
+func (db *DockerBackend) Append(dh manager.Handler, envs map[string]string) (string, error) {
+	cid, err := db.SpawnFunction(dh.(*dockerHandler), envs)
+	if err != nil {
+		return "", err
+	}
+	return cid, nil
+}
+
+func (db *DockerBackend) ShutdownContainer(cid string) {
+	db.KillContainer(cid)
+}
+
+func (db *DockerBackend) StartContainerById(h manager.Handler, id string) (string, error) {
+	dh := h.(*dockerHandler)
+	err := db.client.ContainerStart(context.Background(), id, container.StartOptions{})
+	if err != nil {
+		return "", err
+	}
+	c, err := db.client.ContainerInspect(
+		context.Background(),
+		id,
+	)
+	if err != nil {
+		return "", err
+	}
+	ip := c.NetworkSettings.Networks[dh.uniqueName].IPAddress
+	log.Println(dh)
+	log.Printf("IP_ADDR := %s", ip)
+	return ip, nil
+}
+
+func (db *DockerBackend) Create(name string, env string, filedir string, envs map[string]string) (manager.Handler, error) {
 	dh, err := db.BuildImage(name, env, filedir)
 	if err != nil {
 		log.Fatal("Unable to build image", err)
@@ -257,7 +293,7 @@ func (db *DockerBackend) Create(name string, env string, threads int, filedir st
 		log.Fatal("NIL in return value")
 	}
 	log.Println(dh)
-	err = db.SpawnFunction(dh.(*dockerHandler), envs)
+	_, err = db.SpawnFunction(dh.(*dockerHandler), envs)
 	if err != nil {
 		log.Fatal("Unable to spawn function instance", err)
 	}

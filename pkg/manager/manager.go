@@ -32,7 +32,10 @@ type ManagementService struct {
 }
 
 type Backend interface {
-	Create(name string, env string, threads int, filedir string, envs map[string]string) (Handler, error)
+	Create(name string, env string, filedir string, envs map[string]string) (Handler, error)
+	Append(dh Handler, envs map[string]string) (string, error)
+	ShutdownContainer(cid string)
+	StartContainerById(dh Handler, cid string) (string, error)
 	Stop() error
 }
 
@@ -57,7 +60,6 @@ func New(id string, rproxyListenAddress string, rproxyPort map[string]int, rprox
 	return ms
 }
 
-// TODO: maybe think about implementing appendFunction() - deploys remembered function containers, if they are known to the system
 func (ms *ManagementService) createFunction(name string, env string, threads int, funczip []byte, subfolderPath string, envs map[string]string) (string, error) {
 
 	// only allow alphanumeric characters
@@ -131,7 +133,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	ms.functionHandlersMutex.Lock()
 	defer ms.functionHandlersMutex.Unlock()
 
-	fh, err := ms.backend.Create(name, env, threads, p, envs)
+	fh, err := ms.backend.Create(name, env, p, envs)
 
 	if err != nil {
 		return "", err
@@ -214,6 +216,25 @@ func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 	}
 
 	return fh.Logs()
+}
+
+func (ms *ManagementService) NewFunctionInstance(name string, envs map[string]string) (string, Handler, error) {
+	fh, ok := ms.functionHandlers[name]
+	if !ok {
+		return "", nil, fmt.Errorf("function %s not found", name)
+	}
+	cid, err := ms.backend.Append(fh, envs)
+	if err != nil {
+		return "", nil, err
+	}
+
+	ip, err := ms.backend.StartContainerById(fh, cid)
+	if err != nil {
+		// container did not start properly...
+		return "", nil, err
+	}
+
+	return ip, fh, nil
 }
 
 func (ms *ManagementService) List() []string {

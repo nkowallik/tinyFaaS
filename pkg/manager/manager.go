@@ -33,7 +33,7 @@ type ManagementService struct {
 
 type Backend interface {
 	Create(name string, env string, filedir string, envs map[string]string) (Handler, error)
-	Append(dh Handler, envs map[string]string) (string, error)
+	Append(dh Handler, envs map[string]string) (string, string, error)
 	ShutdownContainer(cid string)
 	StartContainerById(dh Handler, cid string) (string, error)
 	Stop() error
@@ -218,23 +218,16 @@ func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 	return fh.Logs()
 }
 
-func (ms *ManagementService) NewFunctionInstance(name string, envs map[string]string) (string, Handler, error) {
+func (ms *ManagementService) NewFunctionInstance(name string, envs map[string]string) (string, string, error) {
 	fh, ok := ms.functionHandlers[name]
 	if !ok {
-		return "", nil, fmt.Errorf("function %s not found", name)
+		return "", "", fmt.Errorf("function %s not found", name)
 	}
-	cid, err := ms.backend.Append(fh, envs)
+	cid, ip, err := ms.backend.Append(fh, envs)
 	if err != nil {
-		return "", nil, err
+		return "", "", err
 	}
-
-	ip, err := ms.backend.StartContainerById(fh, cid)
-	if err != nil {
-		// container did not start properly...
-		return "", nil, err
-	}
-
-	return ip, fh, nil
+	return ip, cid, nil
 }
 
 func (ms *ManagementService) List() []string {

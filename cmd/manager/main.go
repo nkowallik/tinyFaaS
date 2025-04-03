@@ -394,14 +394,22 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("got request for cold start:", d)
 
-	ip, dh, err := s.ms.NewFunctionInstance(d.Name, d.Envs) // TODO: Get new function instance from here
+	ip, cid, err := s.ms.NewFunctionInstance(d.Name, d.Envs) // TODO: Get new function instance from here
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println(err)
 		return
 	}
 	log.Println(ip)
-	log.Println(dh)
+	log.Println(cid)
+	b := struct {
+		ip  string `json:"ip"`
+		cid string `json:"cid`
+	}{
+		ip:  ip,
+		cid: cid,
+	}
+	log.Println(b)
 	// TODO: Use new function instance for execution, set instance free
 }
 

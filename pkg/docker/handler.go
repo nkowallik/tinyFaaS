@@ -253,12 +253,17 @@ func (db *DockerBackend) KillContainer(id string) {
 	log.Printf("Destroyed fn container %s", id)
 }
 
-func (db *DockerBackend) Append(dh manager.Handler, envs map[string]string) (string, error) {
+func (db *DockerBackend) Append(dh manager.Handler, envs map[string]string) (string, string, error) {
 	cid, err := db.SpawnFunction(dh.(*dockerHandler), envs)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return cid, nil
+	ip, err := db.StartContainerById(dh.(*dockerHandler), cid)
+	if err != nil {
+		return "", "", err
+	}
+	dh.(*dockerHandler).functions[cid] = ip
+	return cid, ip, nil
 }
 
 func (db *DockerBackend) ShutdownContainer(cid string) {

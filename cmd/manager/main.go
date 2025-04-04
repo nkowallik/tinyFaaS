@@ -165,6 +165,7 @@ func main() {
 	r := http.NewServeMux()
 	r.HandleFunc("/upload", s.uploadHandler)
 	r.HandleFunc("/delete", s.deleteHandler)
+	r.HandleFunc("/rminstance", s.removeInstanceHandler)
 	r.HandleFunc("/list", s.listHandler)
 	r.HandleFunc("/wipe", s.wipeHandler)
 	r.HandleFunc("/logs", s.logsHandler)
@@ -263,6 +264,33 @@ func (s *server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, res)
 
+}
+
+func (s *server) removeInstanceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	t := struct {
+		Cid string `json:"cid"`
+	}{}
+
+	err := json.NewDecoder(r.Body).Decode(&t)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		log.Println(err)
+		return
+	}
+
+	log.Println("got request to shutdown container:", t.Cid)
+
+	err = s.ms.RemoveFunctionInstance(t.Cid)
+	if err != nil {
+		log.Println("THAT DID NOT GO SO WELL")
+		panic(err)
+	}
+	// TODO
 }
 
 func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -380,9 +408,8 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	// parse request
 	d := struct {
-		Name    string            `json:"name"`
-		Envs    map[string]string `json:"envs"`
-		Payload []byte            `json:"payload"`
+		Name string            `json:"name"`
+		Envs map[string]string `json:"envs"`
 	}{}
 
 	err := json.NewDecoder(r.Body).Decode(&d)
@@ -394,8 +421,9 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("got request for cold start:", d)
 
-	ip, cid, err := s.ms.NewFunctionInstance(d.Name, d.Envs) // TODO: Get new function instance from here
+	ip, cid, err := s.ms.NewFunctionInstance(d.Name, d.Envs)
 	if err != nil {
+		log.Println("Error in NewFunctionInstance")
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Println(err)
 		return
@@ -403,14 +431,23 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println(ip)
 	log.Println(cid)
 	b := struct {
-		ip  string `json:"ip"`
-		cid string `json:"cid`
+		Ip  string `json:"ip"`
+		Cid string `json:"cid"`
 	}{
-		ip:  ip,
-		cid: cid,
+		Ip:  ip,
+		Cid: cid,
 	}
-	log.Println(b)
-	// TODO: Use new function instance for execution, set instance free
+	log.Printf("Response := %s", b)
+	jsonStr, err := json.Marshal(b)
+	if err != nil {
+		log.Fatal(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	log.Printf("JSON := ", jsonStr)
+	w.WriteHeader(http.StatusAccepted)
+	w.Write(jsonStr)
+	return
 }
 
 func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {

@@ -15,7 +15,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/archive"
@@ -237,10 +236,10 @@ func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string
 	return container.ID, nil
 }
 
-func (db *DockerBackend) KillContainer(id string) {
+func (db *DockerBackend) KillContainer(id string) error {
 	err := db.client.ContainerStop(context.Background(), id, container.StopOptions{})
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 
 	err = db.client.ContainerRemove(context.Background(), id, container.RemoveOptions{
@@ -248,9 +247,10 @@ func (db *DockerBackend) KillContainer(id string) {
 		RemoveVolumes: true,
 	})
 	if err != nil {
-		log.Println(err)
+		return err
 	}
 	log.Printf("Destroyed fn container %s", id)
+	return nil
 }
 
 func (db *DockerBackend) Append(dh manager.Handler, envs map[string]string) (string, string, error) {
@@ -261,6 +261,47 @@ func (db *DockerBackend) Append(dh manager.Handler, envs map[string]string) (str
 	ip, err := db.StartContainerById(dh.(*dockerHandler), cid)
 	if err != nil {
 		return "", "", err
+	}
+	maxRetries := 10
+	for {
+		maxRetries--
+		if maxRetries == 0 {
+			// container did not start properly!
+			// give people some logs to look at
+			log.Printf("container %s (ip %s) not ready after 10 retries", cid, ip)
+			log.Printf("getting logs for container %s", cid)
+			logs, err := dh.(*dockerHandler).getContainerLogs(cid)
+
+			if err != nil {
+				log.Print(fmt.Errorf("container %s not ready after 10 retries, error encountered when getting logs %s", ip, err))
+			}
+
+			log.Println(logs)
+
+			log.Printf("end of logs for container %s", cid)
+
+			log.Print(fmt.Errorf("container %s not ready after 10 retries", ip))
+		}
+
+		// timeout of 1 second
+		client := http.Client{
+			Timeout: 3 * time.Second,
+		}
+
+		resp, err := client.Get("http://" + ip + ":8000/health")
+		if err != nil {
+			log.Println(err)
+			log.Println("retrying in 1 second")
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			log.Println("container", ip, "is ready")
+			break
+		}
+		log.Println("container", ip, "is not ready yet, retrying in 1 second")
+		time.Sleep(1 * time.Second)
 	}
 	dh.(*dockerHandler).functions[cid] = ip
 	return cid, ip, nil
@@ -465,7 +506,7 @@ func (dh *dockerHandler) Destroy() error {
 
 	// remove image
 	// docker rmi <image>
-	_, err = dh.client.ImageRemove(
+	/*_, err = dh.client.ImageRemove(
 		context.Background(),
 		dh.uniqueName,
 		image.RemoveOptions{},
@@ -476,7 +517,7 @@ func (dh *dockerHandler) Destroy() error {
 	}
 
 	log.Println("removed image", dh.uniqueName)
-
+	*/
 	return nil
 }
 

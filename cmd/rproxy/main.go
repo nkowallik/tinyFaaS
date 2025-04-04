@@ -135,19 +135,19 @@ func main() {
 			def.FunctionResource = def.FunctionResource[1:]
 		}
 
-		if len(def.FunctionContainers) > 0 {
-			// "ips" field not empty: add function
-			log.Printf("adding %s", def.FunctionResource)
-			err = r.Add(def.FunctionResource, def.FunctionContainers)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
+		//if len(def.FunctionContainers) > 0 {
+		// "ips" field not empty: add function
+		log.Printf("adding %s", def.FunctionResource)
+		err = r.Add(def.FunctionResource, def.FunctionContainers)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return
-		} else {
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+		return
+		/*} else {
 
 			log.Printf("deleting %s", def.FunctionResource)
 			err = r.Del(def.FunctionResource)
@@ -156,28 +156,75 @@ func main() {
 				return
 
 			}
-		}
+		}*/
 	})
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 	quit := make(chan struct{})
 	go func() {
 		for {
 			select {
 			case <-ticker.C:
-				for _, fis := range r.Hosts {
-					for _, fi := range fis {
-						if !fi.InUse && time.Since(fi.LastUsed) > 30000 { // TODO: make this keep-alive configurable
-							fi.Mu.Lock()
-							fi.InUse = true
-							log.Printf("Removing container %s", fi.Cid)
-							// TODO: remove this function instance
+				for name, fis := range r.Hosts {
+					if len(fis) > 0 {
+						log.Println(name)
+					}
+					for cid, fi := range fis {
+						if r.Hosts[name][cid].LastUsed.IsZero() {
+							log.Println("LastUsed is empty -- continuing")
+							continue
 						}
+						log.Printf("InUse: %t, Age: %f -- (%d)", fi.InUse, time.Since(fi.LastUsed).Seconds(), len(fis))
+						if r.Hosts[name][cid].InUse || time.Since(r.Hosts[name][cid].LastUsed).Seconds() < 30.0 { // TODO: make this keep-alive configurable
+							continue
+						}
+						if !r.Hosts[name][cid].Mu.TryLock() {
+							continue
+						}
+						defer r.Hosts[name][cid].Mu.Unlock()
+						log.Printf("Removing container %s", fi.Cid)
+						r.Hl.Lock()
+						delete(r.Hosts[name], fi.Cid)
+						r.Hl.Unlock()
+						client := &http.Client{}
+						t := struct {
+							Cid string
+						}{
+							Cid: fi.Cid,
+						}
+
+						jsonStr, err := json.Marshal(t)
+						if err != nil {
+							log.Print(err)
+							continue
+						}
+
+						req, err := http.NewRequest("POST", "http://127.0.0.1:8080/rminstance", bytes.NewBuffer(jsonStr))
+						if err != nil {
+							log.Print(err)
+							continue
+						}
+						resp, err := client.Do(req)
+						if err != nil {
+							log.Print(err)
+						}
+						log.Println(resp)
 					}
 				}
 			case <-quit:
 				ticker.Stop()
 				return
 			}
+		}
+	}()
+	// TODO: this should probably only be started after joining a cluster
+	alerter := time.NewTicker(5 * time.Second)
+	go func() {
+		select {
+		case <-alerter.C:
+			// TODO: send update to cluster leader, if part of a cluster
+		case <-quit:
+			alerter.Stop()
+			return
 		}
 	}()
 
@@ -189,7 +236,7 @@ func main() {
 			log.Printf("%s", err)
 		}
 	}()
-	go cpuWatcher()
+	go cpuWatcher(r)
 
 	s := make(chan os.Signal, 1)
 
@@ -198,10 +245,9 @@ func main() {
 	<-s
 
 	log.Printf("exiting")
-	return
 }
 
-func cpuWatcher() {
+func cpuWatcher(r *rproxy.RProxy) {
 	var count = 0
 	for {
 		cmd := exec.Command("./get_cpu_usage.sh")
@@ -214,12 +260,17 @@ func cpuWatcher() {
 			log.Fatal(err)
 		}
 		log.Printf("Usage: %f", usage)
+		r.Cluster.Mu.Lock()
+		node := r.Cluster.Nodes[r.Cluster.Ip]
+		node.CpuUsage = usage
+		r.Cluster.Nodes[r.Cluster.Ip] = node
+		r.Cluster.Mu.Unlock()
 		if usage >= 80.0 {
 			// TODO: start new node
 			cmd := exec.Command("./start_node.sh")
 			out, err := cmd.Output()
 			if err != nil {
-				log.Fatal(err)
+				log.Print(err)
 			}
 			log.Println(string(out))
 			count = 0
@@ -228,7 +279,7 @@ func cpuWatcher() {
 			cmd := exec.Command("./stop_node.sh")
 			out, err := cmd.Output()
 			if err != nil {
-				log.Fatal(err)
+				log.Print(err)
 			}
 			log.Println(string(out))
 			count = 0

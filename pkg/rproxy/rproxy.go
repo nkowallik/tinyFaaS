@@ -25,6 +25,23 @@ const (
 	StatusError
 )
 
+type Cluster struct {
+	Nodes map[string]ClusterNode
+	Size  uint64
+	Mu    *sync.Mutex
+	Ip    string
+}
+
+type ClusterNode struct {
+	Address  string
+	CpuUsage float64
+	Running  map[string]int16
+	InUse    map[string]int16
+	Up       bool
+	LastUsed time.Time
+	Master   bool
+}
+
 type FunctionInstance struct {
 	address  string
 	Cid      string
@@ -34,15 +51,26 @@ type FunctionInstance struct {
 }
 
 type RProxy struct {
-	Hosts  map[string][]FunctionInstance
-	c      *fasthttp.Client
-	hl     sync.RWMutex
-	status map[string]int
+	Hosts   map[string]map[string]FunctionInstance
+	c       *fasthttp.Client
+	Hl      sync.RWMutex
+	Cluster Cluster
 }
 
 func New() *RProxy {
+	nodes := make(map[string]ClusterNode, 1)
+	addr := GetOutboundIP().String()
+	nodes[addr] = ClusterNode{
+		Address:  addr,
+		CpuUsage: -1.0,
+		Running:  make(map[string]int16),
+		InUse:    make(map[string]int16),
+		Up:       true,
+		LastUsed: time.Now(),
+		Master:   true,
+	}
 	return &RProxy{
-		Hosts: make(map[string][]FunctionInstance),
+		Hosts: make(map[string]map[string]FunctionInstance),
 		c: &fasthttp.Client{
 			MaxConnsPerHost:        256 * 1024,
 			DisablePathNormalizing: true,
@@ -51,6 +79,12 @@ func New() *RProxy {
 				Concurrency: 0,
 			}).DialTimeout,
 		},
+		Cluster: Cluster{
+			Nodes: nodes,
+			Size:  1,
+			Mu:    &sync.Mutex{},
+			Ip:    GetOutboundIP().String(),
+		},
 	}
 }
 
@@ -58,9 +92,8 @@ func (r *RProxy) Add(name string, ips []util.IpWrapper) error {
 	if len(ips) == 0 {
 		return fmt.Errorf("no ips given")
 	}
-
-	r.hl.Lock()
-	defer r.hl.Unlock()
+	r.Hl.Lock()
+	defer r.Hl.Unlock()
 
 	// if function exists, we should update!
 	// if _, ok := r.hosts[name]; ok {
@@ -70,12 +103,35 @@ func (r *RProxy) Add(name string, ips []util.IpWrapper) error {
 	for i, ip := range ips {
 		ips[i] = util.IpWrapper{Ip: fmt.Sprintf("http://%s:8000/fn", ip.Ip), Cid: ip.Cid}
 	}
-	fns := make([]FunctionInstance, 0)
 	for _, ip := range ips {
-		fns = append(fns, FunctionInstance{address: ip.Ip, Cid: ip.Cid, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}})
+		_, ok := r.Hosts[name]
+		if !ok {
+			r.Hosts[name] = make(map[string]FunctionInstance)
+		}
+		r.Hosts[name][ip.Cid] = FunctionInstance{address: ip.Ip, Cid: ip.Cid, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}}
 	}
-	r.Hosts[name] = fns
 
+	return nil
+}
+
+func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
+	msg := struct {
+		CpuUsage float64          `json:"cpuUsage"`
+		Running  map[string]int16 `json:"running"`
+	}{}
+
+	err := json.Unmarshal(values, &msg)
+	if err != nil {
+		return err
+	}
+	r.Cluster.Mu.Lock()
+	node := r.Cluster.Nodes[nodeAddr]
+	defer r.Cluster.Mu.Unlock()
+	node.CpuUsage = msg.CpuUsage
+	for k, v := range msg.Running {
+		node.Running[k] = v
+	}
+	r.Cluster.Nodes[nodeAddr] = node
 	return nil
 }
 
@@ -84,25 +140,26 @@ func (r *RProxy) AddTFInstance(ip string, body []byte) error {
 		return fmt.Errorf("no empty instances")
 	}
 
-	r.hl.Lock()
-	defer r.hl.Unlock()
+	r.Hl.Lock()
+	defer r.Hl.Unlock()
 	var connections = make(map[string][]string)
 	err := json.Unmarshal(body, &connections)
 	if err != nil {
 		return fmt.Errorf("unable to unmarshal body")
 	}
 	log.Println(connections)
-	for name, values := range connections {
-		if _, keyInMap := r.Hosts[name]; !keyInMap {
-			r.Hosts[name] = make([]FunctionInstance, 0)
-		}
-		fns := make([]FunctionInstance, 0)
+	/*for name, values := range connections {
 		for _, val := range values {
 			fns = append(fns, FunctionInstance{address: val, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}})
 		}
 		r.Hosts[name] = append(r.Hosts[name], fns...)
-	}
+	}*/
+	// TODO: figure out clusters
 	return nil
+}
+
+func (r *RProxy) GetIP() string {
+	return r.Cluster.Ip
 }
 
 func GetOutboundIP() net.IP {
@@ -118,15 +175,15 @@ func GetOutboundIP() net.IP {
 }
 
 func (r *RProxy) RegisterInCluster(addr string) error {
-	outboundIp := GetOutboundIP().String()
-	tmp := make(map[string][]string)
-	for k, v := range r.Hosts {
-		tmp[k] = make([]string, 0)
-		for range v {
-			tmp[k] = append(tmp[k], fmt.Sprintf("http://%s:8000/%s", outboundIp, k))
-		}
+	outboundIp := r.Cluster.Ip
+	msg := struct {
+		CpuUsage float32          `json:"cpuUsage"`
+		Running  map[string]int16 `json:"running"`
+	}{
+		CpuUsage: 0.0,
+		Running:  r.Cluster.Nodes[outboundIp].Running,
 	}
-	jsonStr, err := json.Marshal(tmp)
+	jsonStr, err := json.Marshal(msg)
 	if err != nil {
 		log.Fatal(err)
 		return fmt.Errorf("unable to marshal function register")
@@ -149,8 +206,8 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 }
 
 func (r *RProxy) Del(name string) error {
-	r.hl.Lock()
-	defer r.hl.Unlock()
+	r.Hl.Lock()
+	defer r.Hl.Unlock()
 
 	if _, ok := r.Hosts[name]; !ok {
 		return fmt.Errorf("function not found")
@@ -160,22 +217,20 @@ func (r *RProxy) Del(name string) error {
 	return nil
 }
 
-func spawnAndExecute(name string, payload []byte, headers map[string]string) {
+func (r *RProxy) spawnNewInstance(name string, headers map[string]string) (string, string) {
 	tmp := struct {
-		Name    string            `json:"name"`
-		Envs    map[string]string `json:"envs"`
-		Payload []byte            `json:"payload"`
+		Name string            `json:"name"`
+		Envs map[string]string `json:"envs"`
 	}{
-		Name:    name,
-		Envs:    headers,
-		Payload: payload,
+		Name: name,
+		Envs: headers,
 	}
 	jsonStr, err := json.Marshal(tmp)
 	if err != nil {
 		log.Fatal(err)
 		//return fmt.Errorf("unable to marshal function register")
 	}
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000/coldstart", "127.0.0.1"), bytes.NewBuffer(jsonStr))
+	req, err := http.NewRequest("POST", "http://127.0.0.1:8080/coldstart", bytes.NewBuffer(jsonStr))
 	if err != nil {
 		log.Fatal(err)
 		//return fmt.Errorf("unable to perform post request")
@@ -183,75 +238,86 @@ func spawnAndExecute(name string, payload []byte, headers map[string]string) {
 	//req.Header.Set("X-tinyFaaS-register", outboundIp)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Println("Unable to perform request")
+		panic(err)
+	}
+	log.Println(resp.StatusCode)
+	resp_body, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		log.Println("Unable to read body")
+		panic(err)
+	}
+
+	b := struct {
+		Ip  string `json:"Ip"`
+		Cid string `json:"Cid"`
+	}{}
+	log.Printf("BODY := '%s'", resp_body)
+	err = json.Unmarshal(resp_body, &b)
+	if err != nil {
+		log.Println("Unable to unmarshal")
 		panic(err)
 	}
 	defer resp.Body.Close()
-	// TODO: spawn new function via manager (POST to <manager>/coldstart)
-	// TODO: use spawned function to run request (cold-start) (forward to newly created function container)
-	// TODO: register function in TF to allow processing of other requests (release lock on function container)
+	// use spawned function to run request (cold-start) (forward to newly created function container)
+	return b.Ip, b.Cid
 
 }
 
 func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[string]string) (Status, []byte) {
 
-	handler, ok := r.Hosts[name]
+	_, ok := r.Hosts[name]
 
 	if !ok {
 		log.Printf("function not found: %s", name)
 		return StatusNotFound, nil
 	}
 
-	r.hl.Lock()
-	defer r.hl.Unlock()
-
-	if _, keyInMap := r.Hosts[name]; !keyInMap {
-		r.status[name] = -1
-	}
 	var resp = &fasthttp.Response{}
-	r.status[name] = (r.status[name] + 1) % len(r.Hosts[name])
-	for {
-		handler[r.status["name"]].Mu.Lock()
-		defer handler[r.status["name"]].Mu.Unlock()
-		handler[r.status["name"]].InUse = true
-		h := handler[0]
-		for i, hcand := range handler {
-			if !hcand.InUse {
-				hcand.InUse = true
-				h = hcand
-				break
-			}
-			if i == len(handler)-1 {
-				spawnAndExecute(name, payload, headers)
-			}
-		}
-
-		log.Printf("chosen handler: %s", h.address)
-
-		req := &fasthttp.Request{}
-
-		req.SetRequestURI(h.address)
-		req.Header.SetMethod(fasthttp.MethodPost)
-		req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
-		req.SetBodyRaw(payload)
-
-		resp = &fasthttp.Response{}
-
-		err := r.c.DoTimeout(req, resp, 100*time.Second)
-
-		if err != nil {
-			if len(r.Hosts[name]) < 1 {
-				log.Print(err)
-				return StatusError, nil
-			}
-			r.Hosts[name] = append(r.Hosts[name][:r.status[name]], r.Hosts[name][r.status[name]+1:]...)
-			r.status[name] = r.status[name] % len(r.Hosts[name])
-			continue
-		}
-		break
+	var freeCid string
+	if len(r.Hosts[name]) == 0 {
+		ip, cid := r.spawnNewInstance(name, headers)
+		newHandler := FunctionInstance{address: fmt.Sprintf("http://%s:8000/fn", ip), Cid: cid, InUse: false, Mu: &sync.Mutex{}}
+		r.Hosts[name][cid] = newHandler
+		freeCid = cid
 	}
+	for cid := range r.Hosts[name] {
+		if !r.Hosts[name][cid].InUse {
+			h := r.Hosts[name][cid]
+			h.InUse = true
+			r.Hosts[name][cid] = h
+			freeCid = cid
+			break
+		}
+	}
+	if freeCid == "" {
+		ip, cid := r.spawnNewInstance(name, headers)
+		newHandler := FunctionInstance{address: fmt.Sprintf("http://%s:8000/fn", ip), Cid: cid, InUse: true, Mu: &sync.Mutex{}}
+		r.Hosts[name][cid] = newHandler
+		freeCid = cid
+	}
+	log.Printf("chosen handler: %s", r.Hosts[name][freeCid].address)
+
+	req := &fasthttp.Request{}
+
+	req.SetRequestURI(r.Hosts[name][freeCid].address)
+	req.Header.SetMethod(fasthttp.MethodPost)
+	req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
+	req.SetBodyRaw(payload)
+
+	resp = &fasthttp.Response{}
+
+	err := r.c.DoTimeout(req, resp, 100*time.Second)
+
+	if err != nil {
+		log.Println("Unable to complete request, retrying ...")
+		return r.fastCall(name, payload, async, headers)
+	}
+
 	statusCode := resp.StatusCode()
 	respBody := resp.Body()
 
@@ -262,29 +328,32 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 	}
 
 	// log.Printf("have response for sync request: %s", respBody)
-	handler[r.status["name"]].InUse = false
-	handler[r.status["name"]].LastUsed = time.Now()
+	log.Println("Attempting write to storage")
+	r.Hosts[name][freeCid].Mu.Lock()
+	tmp := r.Hosts[name][freeCid]
+	tmp.InUse = false
+	tmp.LastUsed = time.Now()
+	r.Hosts[name][freeCid] = tmp
+	r.Hosts[name][freeCid].Mu.Unlock()
+	log.Println("Written to storage")
 	return StatusOK, respBody
 }
 
 func (r *RProxy) normalCall(name string, payload []byte, async bool, headers map[string]string) (Status, []byte) {
-	handler, ok := r.Hosts[name]
-
-	if !ok {
+	if len(r.Hosts[name]) > 0 {
 		log.Printf("function not found: %s", name)
 		return StatusNotFound, nil
 	}
 
 	// log.Printf("have handlers: %s", handler)
-
-	r.hl.Lock()
-	defer r.hl.Unlock()
-
-	if _, keyInMap := r.Hosts[name]; !keyInMap {
-		r.status[name] = -1
+	var h FunctionInstance
+	for cid, fi := range r.Hosts[name] {
+		tmpMu := r.Hosts[name][cid].Mu
+		if !r.Hosts[name][cid].InUse && tmpMu.TryLock() {
+			defer tmpMu.Unlock()
+			h = fi
+		}
 	}
-	r.status[name] = (r.status[name] + 1) % len(r.Hosts[name])
-	h := handler[r.status["name"]]
 
 	log.Printf("chosen handler: %s", h.address)
 

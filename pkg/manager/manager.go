@@ -36,6 +36,7 @@ type Backend interface {
 	Append(dh Handler, envs map[string]string) (string, string, error)
 	ShutdownContainer(cid string)
 	StartContainerById(dh Handler, cid string) (string, error)
+	KillContainer(cid string) error
 	Stop() error
 }
 
@@ -101,7 +102,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 		return "", err
 	}
 
-	defer func() { // TODO: copy it into an archive like structure first
+	defer func() {
 		// remove folder
 		err = os.RemoveAll(p)
 		if err != nil {
@@ -122,12 +123,12 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	}
 
 	// we know this function already, destroy its current handler
-	if _, ok := ms.functionHandlers[name]; ok {
-		err = ms.functionHandlers[name].Destroy()
-		if err != nil {
-			return "", err
-		}
-	}
+	//if _, ok := ms.functionHandlers[name]; ok {
+	//	err = ms.functionHandlers[name].Destroy()
+	//	if err != nil {
+	//		return "", err
+	//	}
+	//}
 
 	// create new function handler
 	ms.functionHandlersMutex.Lock()
@@ -216,6 +217,10 @@ func (ms *ManagementService) LogsFunction(name string) (io.Reader, error) {
 	}
 
 	return fh.Logs()
+}
+
+func (ms *ManagementService) RemoveFunctionInstance(cid string) error {
+	return ms.backend.KillContainer(cid)
 }
 
 func (ms *ManagementService) NewFunctionInstance(name string, envs map[string]string) (string, string, error) {

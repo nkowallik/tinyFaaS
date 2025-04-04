@@ -43,6 +43,12 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 			r.RegisterInCluster(joincluster)
 			return
 		}
+		nodeAddr := req.Header.Get("X-tinyFaaS-status")
+		if nodeAddr != "" {
+			log.Printf("Updating Node Status")
+			r.UpdateClusterNode(nodeAddr, req_body)
+			return
+		}
 
 		headers := make(map[string]string)
 		for k, v := range req.Header {

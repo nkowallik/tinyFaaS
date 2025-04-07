@@ -221,7 +221,36 @@ func main() {
 	go func() {
 		select {
 		case <-alerter.C:
-			// TODO: send update to cluster leader, if part of a cluster
+			if r.Cluster.Worker {
+				ip := r.Cluster.Master.Address
+				msg := struct {
+					CpuUsage float64          `json:"cpuUsage"`
+					Running  map[string]int16 `json:"running"`
+				}{
+					CpuUsage: r.Cluster.Nodes[ip].CpuUsage,
+					Running:  r.Cluster.Nodes[ip].Running,
+				}
+				jsonStr, err := json.Marshal(msg)
+				if err != nil {
+					log.Println("Unable to marshal cpu message")
+					log.Panic(err)
+				}
+				req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8080", ip), bytes.NewBuffer(jsonStr))
+				if err != nil {
+					log.Fatal(err)
+					//return fmt.Errorf("unable to perform post request")
+				}
+				req.Header.Set("X-tinyFaaS-status", r.Cluster.Ip)
+				req.Header.Set("Content-Type", "application/json")
+
+				client := http.Client{}
+				resp, err := client.Do(req)
+				if err != nil {
+					log.Println("Unable to perform request")
+					panic(err)
+				}
+				log.Printf("Got response: %d", resp.StatusCode)
+			}
 		case <-quit:
 			alerter.Stop()
 			return
@@ -261,7 +290,12 @@ func cpuWatcher(r *rproxy.RProxy) {
 		}
 		log.Printf("Usage: %f", usage)
 		r.Cluster.Mu.Lock()
-		node := r.Cluster.Nodes[r.Cluster.Ip]
+		node, ok := r.Cluster.Nodes[r.Cluster.Ip]
+		if !ok {
+			r.Cluster.Mu.Unlock()
+			time.Sleep(10 * time.Second)
+			continue
+		}
 		node.CpuUsage = usage
 		r.Cluster.Nodes[r.Cluster.Ip] = node
 		r.Cluster.Mu.Unlock()

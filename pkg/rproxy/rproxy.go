@@ -26,10 +26,11 @@ const (
 )
 
 type Cluster struct {
-	Nodes map[string]ClusterNode
-	Size  uint64
-	Mu    *sync.Mutex
-	Ip    string
+	Nodes  map[string]ClusterNode
+	Mu     *sync.Mutex
+	Ip     string
+	Worker bool
+	Master ClusterNode
 }
 
 type ClusterNode struct {
@@ -39,7 +40,7 @@ type ClusterNode struct {
 	InUse    map[string]int16
 	Up       bool
 	LastUsed time.Time
-	Master   bool
+	isMaster bool
 }
 
 type FunctionInstance struct {
@@ -58,16 +59,15 @@ type RProxy struct {
 }
 
 func New() *RProxy {
-	nodes := make(map[string]ClusterNode, 1)
 	addr := GetOutboundIP().String()
-	nodes[addr] = ClusterNode{
+	node := ClusterNode{
 		Address:  addr,
 		CpuUsage: -1.0,
 		Running:  make(map[string]int16),
 		InUse:    make(map[string]int16),
 		Up:       true,
 		LastUsed: time.Now(),
-		Master:   true,
+		isMaster: true,
 	}
 	return &RProxy{
 		Hosts: make(map[string]map[string]FunctionInstance),
@@ -80,10 +80,11 @@ func New() *RProxy {
 			}).DialTimeout,
 		},
 		Cluster: Cluster{
-			Nodes: nodes,
-			Size:  1,
-			Mu:    &sync.Mutex{},
-			Ip:    GetOutboundIP().String(),
+			Nodes:  make(map[string]ClusterNode, 0),
+			Mu:     &sync.Mutex{},
+			Ip:     addr,
+			Worker: false,
+			Master: node,
 		},
 	}
 }
@@ -94,11 +95,6 @@ func (r *RProxy) Add(name string, ips []util.IpWrapper) error {
 	}
 	r.Hl.Lock()
 	defer r.Hl.Unlock()
-
-	// if function exists, we should update!
-	// if _, ok := r.hosts[name]; ok {
-	// 	return fmt.Errorf("function already exists")
-	// }
 
 	for i, ip := range ips {
 		ips[i] = util.IpWrapper{Ip: fmt.Sprintf("http://%s:8000/fn", ip.Ip), Cid: ip.Cid}
@@ -115,6 +111,7 @@ func (r *RProxy) Add(name string, ips []util.IpWrapper) error {
 }
 
 func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
+	log.Printf("Updating node %s\n", nodeAddr)
 	msg := struct {
 		CpuUsage float64          `json:"cpuUsage"`
 		Running  map[string]int16 `json:"running"`
@@ -135,27 +132,28 @@ func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
 	return nil
 }
 
-func (r *RProxy) AddTFInstance(ip string, body []byte) error {
+func (r *RProxy) AddTFInstance(ip string, body []byte) (*ClusterNode, error) {
 	if ip == "" {
-		return fmt.Errorf("no empty instances")
+		return nil, fmt.Errorf("no empty instances")
 	}
 
-	r.Hl.Lock()
-	defer r.Hl.Unlock()
-	var connections = make(map[string][]string)
-	err := json.Unmarshal(body, &connections)
-	if err != nil {
-		return fmt.Errorf("unable to unmarshal body")
+	msg := struct {
+		CpuUsage float64          `json:"cpuUsage"`
+		Running  map[string]int16 `json:"running"`
+	}{}
+
+	r.Cluster.Mu.Lock()
+	defer r.Cluster.Mu.Unlock()
+	r.Cluster.Nodes[ip] = ClusterNode{
+		Address:  ip,
+		CpuUsage: msg.CpuUsage,
+		Running:  make(map[string]int16),
+		InUse:    make(map[string]int16),
+		Up:       true,
+		LastUsed: time.Now(),
+		isMaster: false,
 	}
-	log.Println(connections)
-	/*for name, values := range connections {
-		for _, val := range values {
-			fns = append(fns, FunctionInstance{address: val, LastUsed: time.Now(), InUse: false, Mu: &sync.Mutex{}})
-		}
-		r.Hosts[name] = append(r.Hosts[name], fns...)
-	}*/
-	// TODO: figure out clusters
-	return nil
+	return &r.Cluster.Master, nil
 }
 
 func (r *RProxy) GetIP() string {
@@ -176,11 +174,12 @@ func GetOutboundIP() net.IP {
 
 func (r *RProxy) RegisterInCluster(addr string) error {
 	outboundIp := r.Cluster.Ip
+	usage := r.Cluster.Nodes[outboundIp].CpuUsage
 	msg := struct {
-		CpuUsage float32          `json:"cpuUsage"`
+		CpuUsage float64          `json:"cpuUsage"`
 		Running  map[string]int16 `json:"running"`
 	}{
-		CpuUsage: 0.0,
+		CpuUsage: usage,
 		Running:  r.Cluster.Nodes[outboundIp].Running,
 	}
 	jsonStr, err := json.Marshal(msg)
@@ -202,6 +201,23 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 		panic(err)
 	}
 	defer resp.Body.Close()
+
+	resp_body, err := io.ReadAll(resp.Body)
+
+	if err != nil {
+		log.Println("Unable to read body")
+		panic(err)
+	}
+	tmp := ClusterNode{}
+	err = json.Unmarshal(resp_body, &tmp)
+	if err != nil {
+		log.Println("Unable to unpack ")
+	}
+	r.Cluster.Mu.Lock()
+	r.Cluster.Master.isMaster = false
+	r.Cluster.Nodes[r.Cluster.Master.Address] = r.Cluster.Master
+	r.Cluster.Master = tmp
+	r.Cluster.Worker = true
 	return nil
 }
 

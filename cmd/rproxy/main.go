@@ -135,8 +135,6 @@ func main() {
 			def.FunctionResource = def.FunctionResource[1:]
 		}
 
-		//if len(def.FunctionContainers) > 0 {
-		// "ips" field not empty: add function
 		log.Printf("adding %s", def.FunctionResource)
 		err = r.Add(def.FunctionResource, def.FunctionContainers)
 		if err != nil {
@@ -147,16 +145,6 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 		return
-		/*} else {
-
-			log.Printf("deleting %s", def.FunctionResource)
-			err = r.Del(def.FunctionResource)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-
-			}
-		}*/
 	})
 	ticker := time.NewTicker(1 * time.Second)
 	quit := make(chan struct{})
@@ -216,7 +204,6 @@ func main() {
 			}
 		}
 	}()
-	// TODO: this should probably only be started after joining a cluster
 	alerter := time.NewTicker(5 * time.Second)
 	go func() {
 		select {
@@ -238,7 +225,6 @@ func main() {
 				req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8080", ip), bytes.NewBuffer(jsonStr))
 				if err != nil {
 					log.Fatal(err)
-					//return fmt.Errorf("unable to perform post request")
 				}
 				req.Header.Set("X-tinyFaaS-status", r.Cluster.Ip)
 				req.Header.Set("Content-Type", "application/json")
@@ -277,7 +263,7 @@ func main() {
 }
 
 func cpuWatcher(r *rproxy.RProxy) {
-	var count = 0
+	//var count = 0
 	for {
 		cmd := exec.Command("./get_cpu_usage.sh")
 		out, err := cmd.Output()
@@ -299,8 +285,7 @@ func cpuWatcher(r *rproxy.RProxy) {
 		node.CpuUsage = usage
 		r.Cluster.Nodes[r.Cluster.Ip] = node
 		r.Cluster.Mu.Unlock()
-		if usage >= 80.0 {
-			// TODO: start new node
+		/*if usage >= 80.0 {
 			cmd := exec.Command("./start_node.sh")
 			out, err := cmd.Output()
 			if err != nil {
@@ -309,7 +294,6 @@ func cpuWatcher(r *rproxy.RProxy) {
 			log.Println(string(out))
 			count = 0
 		} else if count >= 3 && usage < 80.0 {
-			// TODO: shutdown another node
 			cmd := exec.Command("./stop_node.sh")
 			out, err := cmd.Output()
 			if err != nil {
@@ -319,7 +303,7 @@ func cpuWatcher(r *rproxy.RProxy) {
 			count = 0
 		} else {
 			count += 1
-		}
+		}*/
 		time.Sleep(10 * time.Second) // TODO: adapt sleep time
 	}
 }

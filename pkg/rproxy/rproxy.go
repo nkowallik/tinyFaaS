@@ -8,7 +8,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os/exec"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -26,11 +28,11 @@ const (
 )
 
 type Cluster struct {
-	Nodes  map[string]ClusterNode
+	Nodes  map[string]*ClusterNode
 	Mu     *sync.Mutex
 	Ip     string
 	Worker bool
-	Master ClusterNode
+	Master *ClusterNode
 }
 
 type ClusterNode struct {
@@ -69,6 +71,8 @@ func New() *RProxy {
 		LastUsed: time.Now(),
 		isMaster: true,
 	}
+	nodes := make(map[string]*ClusterNode, 1)
+	nodes[addr] = &node
 	return &RProxy{
 		Hosts: make(map[string]map[string]FunctionInstance),
 		c: &fasthttp.Client{
@@ -80,11 +84,11 @@ func New() *RProxy {
 			}).DialTimeout,
 		},
 		Cluster: Cluster{
-			Nodes:  make(map[string]ClusterNode, 0),
+			Nodes:  nodes,
 			Mu:     &sync.Mutex{},
 			Ip:     addr,
 			Worker: false,
-			Master: node,
+			Master: &node,
 		},
 	}
 }
@@ -144,7 +148,7 @@ func (r *RProxy) AddTFInstance(ip string, body []byte) (*ClusterNode, error) {
 
 	r.Cluster.Mu.Lock()
 	defer r.Cluster.Mu.Unlock()
-	r.Cluster.Nodes[ip] = ClusterNode{
+	r.Cluster.Nodes[ip] = &ClusterNode{
 		Address:  ip,
 		CpuUsage: msg.CpuUsage,
 		Running:  make(map[string]int16),
@@ -153,7 +157,8 @@ func (r *RProxy) AddTFInstance(ip string, body []byte) (*ClusterNode, error) {
 		LastUsed: time.Now(),
 		isMaster: false,
 	}
-	return &r.Cluster.Master, nil
+	log.Println(r.Cluster)
+	return r.Cluster.Master, nil
 }
 
 func (r *RProxy) GetIP() string {
@@ -216,7 +221,7 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 	r.Cluster.Mu.Lock()
 	r.Cluster.Master.isMaster = false
 	r.Cluster.Nodes[r.Cluster.Master.Address] = r.Cluster.Master
-	r.Cluster.Master = tmp
+	r.Cluster.Master = &tmp
 	r.Cluster.Worker = true
 	return nil
 }
@@ -284,6 +289,83 @@ func (r *RProxy) spawnNewInstance(name string, headers map[string]string) (strin
 
 }
 
+func startNextNode() {
+	cmd := exec.Command("./start_node.sh")
+	out, err := cmd.Output()
+	if err != nil {
+		log.Print(err)
+	}
+	log.Println(string(out))
+}
+
+func stopNextNode() {
+	cmd := exec.Command("./stop_node.sh")
+	out, err := cmd.Output()
+	if err != nil {
+		log.Print(err)
+	}
+	log.Println(string(out))
+}
+
+func planRessources(nodes []*ClusterNode) (bool, bool) {
+	MASTER_THRESHOLD := 80.0
+	WORKER_THRESHOLD := 90.0
+	avg := 0.0
+	avg_threshold := 0.0
+	avg_minus_threshold := 0.0
+	for i, node := range nodes {
+		avg += node.CpuUsage
+		if node.isMaster {
+			avg_threshold += MASTER_THRESHOLD
+		} else {
+			avg_threshold += WORKER_THRESHOLD
+		}
+		if i < len(nodes)-1 {
+			if node.isMaster {
+				avg_minus_threshold += MASTER_THRESHOLD
+			} else {
+				avg_minus_threshold += WORKER_THRESHOLD
+			}
+		}
+	}
+	return avg >= avg_threshold, avg < avg_minus_threshold
+}
+
+func checkNode(node *ClusterNode) bool {
+	MASTER_THRESHOLD := 80.0
+	WORKER_THRESHOLD := 90.0
+	if node.isMaster {
+		return node.CpuUsage < MASTER_THRESHOLD
+	} else {
+		return node.CpuUsage < WORKER_THRESHOLD
+	}
+}
+
+func (r *RProxy) decideBestRunningLocation() *ClusterNode {
+	nodes := make([]*ClusterNode, len(r.Cluster.Nodes))
+	for _, node := range r.Cluster.Nodes {
+		if node.Up {
+			nodes = append(nodes, node)
+		}
+	}
+	sort.Slice(nodes[:], func(i, j int) bool {
+		return nodes[i].CpuUsage > nodes[j].CpuUsage
+	})
+	start, stop := planRessources(nodes)
+	if start {
+		startNextNode()
+	}
+	if stop {
+		stopNextNode()
+	}
+	for i := 0; i < len(nodes); i++ {
+		if checkNode(nodes[i]) {
+			return nodes[i]
+		}
+	}
+	return r.Cluster.Master
+}
+
 func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[string]string) (Status, []byte) {
 
 	_, ok := r.Hosts[name]
@@ -294,6 +376,43 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 	}
 
 	var resp = &fasthttp.Response{}
+
+	node := r.decideBestRunningLocation()
+
+	if !node.isMaster {
+		req := &fasthttp.Request{}
+		retry := true
+		req.SetRequestURI(fmt.Sprintf("http://%s:8080/%s", node.Address, name))
+		req.Header.SetMethod(fasthttp.MethodPost)
+		req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
+		req.SetBodyRaw(payload)
+
+		resp = &fasthttp.Response{}
+
+		err := r.c.DoTimeout(req, resp, 100*time.Second)
+
+		if err != nil {
+			if retry {
+				retry = false
+				log.Println("Unable to complete request, retrying ...")
+				return r.fastCall(name, payload, async, headers)
+			}
+			log.Println("Node unreachable, marking node as Down.")
+			node.Up = false
+			return r.fastCall(name, payload, async, headers)
+		}
+
+		statusCode := resp.StatusCode()
+		respBody := resp.Body()
+
+		if statusCode != http.StatusOK {
+			log.Printf("handler returned status code: %d", statusCode)
+
+			return StatusError, nil
+		}
+		node.LastUsed = time.Now()
+		return StatusOK, respBody
+	}
 	var freeCid string
 	if len(r.Hosts[name]) == 0 {
 		ip, cid := r.spawnNewInstance(name, headers)

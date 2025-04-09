@@ -358,12 +358,12 @@ func (r *RProxy) decideBestRunningLocation() *ClusterNode {
 	if stop {
 		stopNextNode()
 	}
-	for i := 0; i < len(nodes); i++ {
+	for i := 0; i < len(nodes); i++ { // use node with highest load, that is not already above threshold
 		if checkNode(nodes[i]) {
 			return nodes[i]
 		}
 	}
-	return r.Cluster.Master
+	return nodes[len(nodes)-1] // return least stressed node, if all nodes are above threshold and waiting for new node to start
 }
 
 func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[string]string) (Status, []byte) {

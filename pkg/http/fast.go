@@ -58,7 +58,7 @@ func StartFastHTTP(r *rproxy.RProxy, listenAddr string) {
 		Concurrency: 256 * 1024,
 	}
 
-	// err := fasthttp.ListenAndServe(listenAddr, h.ServeHTTP)
+	// err := fasthttp.ListenAndServe(listen^dr, h.ServeHTTP)
 	err := s.ListenAndServe(listenAddr)
 
 	if err != nil {

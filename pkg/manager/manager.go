@@ -65,12 +65,14 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	// only allow alphanumeric characters
 	if !util.IsAlphaNumeric(name) {
+		log.Println("1")
 		return "", fmt.Errorf("function name %s contains non-alphanumeric characters", name)
 	}
 
 	// make a uuidv4 for the function
 	uuid, err := uuid.NewRandom()
 	if err != nil {
+		log.Println("2")
 		return "", err
 	}
 
@@ -83,6 +85,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	err = os.MkdirAll(p, 0777)
 
 	if err != nil {
+		log.Println("3")
 		return "", err
 	}
 
@@ -93,6 +96,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	err = os.WriteFile(zipPath, funczip, 0777)
 
 	if err != nil {
+		log.Println(4)
 		return "", err
 	}
 
@@ -137,17 +141,18 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	fh, err := ms.backend.Create(name, env, p, envs)
 
 	if err != nil {
+		log.Fatalln("Unable to run Create in backend")
 		return "", err
 	}
 
 	ms.functionHandlers[name] = fh
 
-	err = ms.functionHandlers[name].Start()
+	//err = ms.functionHandlers[name].Start()
 
-	if err != nil {
+	/*if err != nil {
 		// container did not start properly...
 		return "", err
-	}
+	}*/
 
 	// tell rproxy about the new function
 	// curl -X POST http://localhost:80/add -d '{"name": "<name>", "ips": ["<ip1>", "<ip2>"]}'
@@ -161,6 +166,7 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	b, err := json.Marshal(d)
 	if err != nil {
+		log.Println("Error Unmarshalling")
 		return "", err
 	}
 

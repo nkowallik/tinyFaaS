@@ -1,6 +1,7 @@
 package http
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -33,20 +34,41 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 
 		if req.Header.Get("X-tinyFaaS-register") != "" {
 			log.Printf("Registering: %s", req.Header.Get("X-tinyFaaS-register"))
-			r.AddTFInstance(req.Header.Get("X-tinyFaaS-register"), req_body)
+			node, err := r.AddTFInstance(req.Header.Get("X-tinyFaaS-register"), req_body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				log.Print(err)
+				return
+			}
+			json.NewEncoder(w).Encode(node)
 			return
 		}
 
 		var joincluster = req.Header.Get("X-tinyFaaS-joincluster")
 		if joincluster != "" {
 			log.Printf("Joining cluster: %s", joincluster)
-			r.RegisterInCluster(joincluster)
+			err := r.RegisterInCluster(joincluster)
+			if err != nil {
+				log.Fatal("Bad Request Response", err)
+				w.WriteHeader(http.StatusBadRequest)
+				log.Print(err)
+				return
+			}
+			log.Println("Respond OK!")
+			log.Println(r.Cluster)
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		nodeAddr := req.Header.Get("X-tinyFaaS-status")
 		if nodeAddr != "" {
 			log.Printf("Updating Node Status")
-			r.UpdateClusterNode(nodeAddr, req_body)
+			err := r.UpdateClusterNode(nodeAddr, req_body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				log.Print(err)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 

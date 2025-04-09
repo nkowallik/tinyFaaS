@@ -125,6 +125,7 @@ func main() {
 		err := json.Unmarshal([]byte(newStr), &def)
 
 		if err != nil {
+			log.Fatalln("Error Unmarshalling", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -138,13 +139,13 @@ func main() {
 		log.Printf("adding %s", def.FunctionResource)
 		err = r.Add(def.FunctionResource, def.FunctionContainers)
 		if err != nil {
+			log.Fatalln("Error Adding Function", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
-		return
 	})
 	ticker := time.NewTicker(1 * time.Second)
 	quit := make(chan struct{})
@@ -204,11 +205,15 @@ func main() {
 			}
 		}
 	}()
-	alerter := time.NewTicker(5 * time.Second)
-	go func() {
+	/*alerter := time.NewTicker(5 * time.Second)
+	alerter_quit := make(chan struct{})
+	go func(alerter *time.Ticker) {
+		log.Println("Tick")
 		select {
 		case <-alerter.C:
+			log.Println("Selected")
 			if r.Cluster.Worker {
+				log.Println("Worker")
 				ip := r.Cluster.Master.Address
 				msg := struct {
 					CpuUsage float64          `json:"cpuUsage"`
@@ -237,12 +242,12 @@ func main() {
 				}
 				log.Printf("Got response: %d", resp.StatusCode)
 			}
-		case <-quit:
+		case <-alerter_quit:
 			alerter.Stop()
 			return
 		}
-	}()
-
+	}(alerter)
+	*/
 	go func() {
 		log.Printf("listening on %s", rproxyListenAddress)
 		err := http.ListenAndServe(rproxyListenAddress, server)
@@ -274,17 +279,59 @@ func cpuWatcher(r *rproxy.RProxy) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("Usage: %f", usage)
-		r.Cluster.Mu.Lock()
-		node, ok := r.Cluster.Nodes[r.Cluster.Ip]
-		if !ok {
-			r.Cluster.Mu.Unlock()
-			time.Sleep(10 * time.Second)
-			continue
+		if !r.Cluster.Mu.TryLock() {
+			log.Println("Unable to acquire LOCK! -.-")
 		}
+		//r.Cluster.Mu.Lock()
+		node := r.Cluster.Nodes[r.Cluster.Ip]
 		node.CpuUsage = usage
 		r.Cluster.Nodes[r.Cluster.Ip] = node
 		r.Cluster.Mu.Unlock()
+		tmp := "\n"
+		for _, node := range r.Cluster.Nodes {
+			if node.Up {
+				tmp += fmt.Sprintf("%s: %f\n", node.Address, node.CpuUsage)
+			}
+		}
+		log.Println(tmp)
+		if r.Cluster.Worker {
+			log.Println("I'm a Worker!")
+			log.Println(r)
+			log.Println(r.Cluster)
+			log.Println(r.Cluster.Master)
+			log.Println(r.Cluster.Master.Address)
+			ip := r.Cluster.Master.Address
+			msg := struct {
+				CpuUsage float64          `json:"cpuUsage"`
+				Running  map[string]int16 `json:"running"`
+			}{
+				CpuUsage: r.Cluster.Nodes[ip].CpuUsage,
+				Running:  r.Cluster.Nodes[ip].Running,
+			}
+			jsonStr, err := json.Marshal(msg)
+			if err != nil {
+				log.Println("Unable to marshal cpu message")
+				log.Panic(err)
+			}
+			log.Printf("IPADR: %s", ip)
+			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000", ip), bytes.NewBuffer(jsonStr))
+			if err != nil {
+				log.Fatal(err)
+				panic(err)
+			}
+			req.Header.Set("X-tinyFaaS-status", r.Cluster.Ip)
+
+			client := http.Client{}
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Println("Unable to perform request")
+				panic(err)
+			}
+			log.Printf("Requested: http://%s:8000", ip)
+			log.Printf("Got response: %d", resp.StatusCode)
+		} else {
+			log.Println("I'm the Master!")
+		}
 		/*if usage >= 80.0 {
 			cmd := exec.Command("./start_node.sh")
 			out, err := cmd.Output()

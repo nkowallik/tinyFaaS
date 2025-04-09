@@ -160,9 +160,7 @@ func (db *DockerBackend) BuildImage(name string, env string, filedir string) (ma
 	return dh, nil
 }
 
-func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string) (string, error) {
-	// create network
-	// docker network create <network>
+func (db *DockerBackend) CreateNetwork(dh *dockerHandler) (string, error) {
 	if dh.network == "" {
 		network, err := db.client.NetworkCreate(
 			context.Background(),
@@ -182,6 +180,17 @@ func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string
 
 		log.Println("created network", dh.uniqueName, "with id", network.ID)
 	}
+	return dh.network, nil
+}
+
+func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string) (string, error) {
+	// create network
+	// docker network create <network>
+	networkId, err := db.CreateNetwork(dh)
+	if err != nil {
+		return "", err
+	}
+	log.Println(networkId)
 
 	e := make([]string, 0, len(envs))
 
@@ -325,8 +334,6 @@ func (db *DockerBackend) StartContainerById(h manager.Handler, id string) (strin
 		return "", err
 	}
 	ip := c.NetworkSettings.Networks[dh.uniqueName].IPAddress
-	log.Println(dh)
-	log.Printf("IP_ADDR := %s", ip)
 	return ip, nil
 }
 
@@ -338,12 +345,11 @@ func (db *DockerBackend) Create(name string, env string, filedir string, envs ma
 	if dh == nil {
 		log.Fatal("NIL in return value")
 	}
-	log.Println(dh)
-	_, err = db.SpawnFunction(dh.(*dockerHandler), envs)
+	_, err = db.CreateNetwork(dh.(*dockerHandler))
+	//_, err = db.SpawnFunction(dh.(*dockerHandler), envs)
 	if err != nil {
-		log.Fatal("Unable to spawn function instance", err)
+		log.Fatal("Unable to create network", err)
 	}
-	log.Println(dh)
 	return dh, nil
 }
 
@@ -356,8 +362,6 @@ func (dh *dockerHandler) IPs() []util.IpWrapper {
 }
 
 func (dh *dockerHandler) Start() error {
-	log.Printf("dh: %+v", dh)
-
 	// start containers
 	// docker start <container>
 

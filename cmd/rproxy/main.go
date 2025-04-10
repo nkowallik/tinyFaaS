@@ -138,11 +138,13 @@ func main() {
 
 		log.Printf("adding %s", def.FunctionResource)
 		err = r.Add(def.FunctionResource, def.FunctionContainers)
+		log.Println("After Add")
 		if err != nil {
 			log.Fatalln("Error Adding Function", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		log.Println("Responding")
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -154,8 +156,6 @@ func main() {
 			select {
 			case <-ticker.C:
 				for name, fis := range r.Hosts {
-					r.Hl.Lock()
-					defer r.Hl.Unlock()
 					for cid, fi := range fis {
 						if r.Hosts[name][cid].LastUsed.IsZero() {
 							log.Println("LastUsed is empty -- continuing")
@@ -198,12 +198,13 @@ func main() {
 								}
 								log.Println(resp)
 								if resp.StatusCode < 400 {
+									r.Hl.Lock()
 									delete(r.Hosts[name], fi.Cid)
+									r.Hl.Unlock()
 									break
 								}
 								if counter > 4 {
 									log.Println("Stop trying to delete")
-									r.Hl.Unlock()
 									break
 								}
 							}

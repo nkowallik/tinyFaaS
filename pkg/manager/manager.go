@@ -320,7 +320,6 @@ func (ms *ManagementService) Upload(name string, env string, threads int, zipped
 		log.Println(err)
 		return "", err
 	}
-
 	// create function handler
 	n, err := ms.createFunction(name, env, threads, zip, "", envs)
 

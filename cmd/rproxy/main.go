@@ -154,9 +154,8 @@ func main() {
 			select {
 			case <-ticker.C:
 				for name, fis := range r.Hosts {
-					if len(fis) > 0 {
-						log.Println(name)
-					}
+					r.Hl.Lock()
+					defer r.Hl.Unlock()
 					for cid, fi := range fis {
 						if r.Hosts[name][cid].LastUsed.IsZero() {
 							log.Println("LastUsed is empty -- continuing")
@@ -171,9 +170,6 @@ func main() {
 						}
 						defer r.Hosts[name][cid].Mu.Unlock()
 						log.Printf("Removing container %s", fi.Cid)
-						r.Hl.Lock()
-						delete(r.Hosts[name], fi.Cid)
-						r.Hl.Unlock()
 						client := &http.Client{}
 						t := struct {
 							Cid string
@@ -186,17 +182,32 @@ func main() {
 							log.Print(err)
 							continue
 						}
-
-						req, err := http.NewRequest("POST", "http://127.0.0.1:8080/rminstance", bytes.NewBuffer(jsonStr))
-						if err != nil {
-							log.Print(err)
-							continue
-						}
-						resp, err := client.Do(req)
-						if err != nil {
-							log.Print(err)
-						}
-						log.Println(resp)
+						go func() {
+							counter := 0
+							for {
+								counter++
+								req, err := http.NewRequest("POST", "http://127.0.0.1:8080/rminstance", bytes.NewBuffer(jsonStr))
+								if err != nil {
+									log.Print(err)
+									continue
+								}
+								resp, err := client.Do(req)
+								if err != nil {
+									log.Print(err)
+									continue
+								}
+								log.Println(resp)
+								if resp.StatusCode < 400 {
+									delete(r.Hosts[name], fi.Cid)
+									break
+								}
+								if counter > 4 {
+									log.Println("Stop trying to delete")
+									r.Hl.Unlock()
+									break
+								}
+							}
+						}()
 					}
 				}
 			case <-quit:
@@ -279,10 +290,10 @@ func cpuWatcher(r *rproxy.RProxy) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if !r.Cluster.Mu.TryLock() {
-			log.Println("Unable to acquire LOCK! -.-")
-		}
-		//r.Cluster.Mu.Lock()
+		/*if !r.Cluster.Mu.TryLock() {
+			log.Println("Unable to acquire LOCK!")
+		}*/
+		r.Cluster.Mu.Lock()
 		node := r.Cluster.Nodes[r.Cluster.Ip]
 		node.CpuUsage = usage
 		r.Cluster.Nodes[r.Cluster.Ip] = node
@@ -294,12 +305,8 @@ func cpuWatcher(r *rproxy.RProxy) {
 			}
 		}
 		log.Println(tmp)
+		sleepTime := 10 * time.Second
 		if r.Cluster.Worker {
-			log.Println("I'm a Worker!")
-			log.Println(r)
-			log.Println(r.Cluster)
-			log.Println(r.Cluster.Master)
-			log.Println(r.Cluster.Master.Address)
 			ip := r.Cluster.Master.Address
 			msg := struct {
 				CpuUsage float64          `json:"cpuUsage"`
@@ -311,46 +318,24 @@ func cpuWatcher(r *rproxy.RProxy) {
 			jsonStr, err := json.Marshal(msg)
 			if err != nil {
 				log.Println("Unable to marshal cpu message")
-				log.Panic(err)
+				log.Println(err)
 			}
-			log.Printf("IPADR: %s", ip)
 			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000", ip), bytes.NewBuffer(jsonStr))
 			if err != nil {
-				log.Fatal(err)
-				panic(err)
+				log.Println(err)
 			}
 			req.Header.Set("X-tinyFaaS-status", r.Cluster.Ip)
 
 			client := http.Client{}
 			resp, err := client.Do(req)
 			if err != nil {
-				log.Println("Unable to perform request")
-				panic(err)
+				log.Println("Unable to perform request. Retrying.")
+				sleepTime = 100 * time.Millisecond
+				continue
 			}
 			log.Printf("Requested: http://%s:8000", ip)
 			log.Printf("Got response: %d", resp.StatusCode)
-		} else {
-			log.Println("I'm the Master!")
 		}
-		/*if usage >= 80.0 {
-			cmd := exec.Command("./start_node.sh")
-			out, err := cmd.Output()
-			if err != nil {
-				log.Print(err)
-			}
-			log.Println(string(out))
-			count = 0
-		} else if count >= 3 && usage < 80.0 {
-			cmd := exec.Command("./stop_node.sh")
-			out, err := cmd.Output()
-			if err != nil {
-				log.Print(err)
-			}
-			log.Println(string(out))
-			count = 0
-		} else {
-			count += 1
-		}*/
-		time.Sleep(10 * time.Second) // TODO: adapt sleep time
+		time.Sleep(sleepTime) // TODO: adapt sleep time
 	}
 }

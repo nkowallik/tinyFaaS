@@ -65,14 +65,12 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 
 	// only allow alphanumeric characters
 	if !util.IsAlphaNumeric(name) {
-		log.Println("1")
 		return "", fmt.Errorf("function name %s contains non-alphanumeric characters", name)
 	}
 
 	// make a uuidv4 for the function
 	uuid, err := uuid.NewRandom()
 	if err != nil {
-		log.Println("2")
 		return "", err
 	}
 
@@ -85,7 +83,6 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	err = os.MkdirAll(p, 0777)
 
 	if err != nil {
-		log.Println("3")
 		return "", err
 	}
 
@@ -96,7 +93,6 @@ func (ms *ManagementService) createFunction(name string, env string, threads int
 	err = os.WriteFile(zipPath, funczip, 0777)
 
 	if err != nil {
-		log.Println(4)
 		return "", err
 	}
 

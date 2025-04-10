@@ -9,5 +9,5 @@ elif [ -f /opt/tinkerforge/pi2 ] && [ ! -f /opt/tinkerforge/pi3 ]; then
     touch /opt/tinkerforge/pi3
     echo "Scheduling pi3"
 else
-    echo "All nodes are scheduled to start."
+    echo "All nodes are already scheduled to start."
 fi

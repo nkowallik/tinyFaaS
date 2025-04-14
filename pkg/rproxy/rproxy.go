@@ -337,45 +337,49 @@ func (r *RProxy) stopNextNode() {
 }
 
 func planRessources(nodes []*ClusterNode) (bool, bool) {
-	MASTER_THRESHOLD := 70.0
-	WORKER_THRESHOLD := 90.0
-	avg := 0.0
-	avg_threshold := 0.0
-	avg_minus_threshold := 0.0
+	MASTER_CPU_THRESHOLD := 70.0
+	WORKER_CPU_THRESHOLD := 90.0
+	RAM_THRESHOLD := 60.0
+	cpu_avg := 0.0
+	ram_avg := 0.0
+	cpu_avg_threshold := 0.0
+	avg_ram_minus := 0.0
+	avg_cpu_minus_threshold := 0.0
 	for i, node := range nodes {
-		avg += node.CpuUsage
+		cpu_avg += node.CpuUsage
+		ram_avg += node.RamUsage
 		if node.IsMaster {
-			avg_threshold += MASTER_THRESHOLD
+			cpu_avg_threshold += MASTER_CPU_THRESHOLD
 		} else {
-			avg_threshold += WORKER_THRESHOLD
+			cpu_avg_threshold += WORKER_CPU_THRESHOLD
 		}
 		if i < len(nodes)-1 {
+			avg_ram_minus += node.RamUsage
 			if node.IsMaster {
-				avg_minus_threshold += MASTER_THRESHOLD
+				avg_cpu_minus_threshold += MASTER_CPU_THRESHOLD
 			} else {
-				avg_minus_threshold += WORKER_THRESHOLD
+				avg_cpu_minus_threshold += WORKER_CPU_THRESHOLD
 			}
 		}
 	}
-	log.Printf("START: %f >= %f ;STOP: %f < %f", avg, avg_threshold, avg, avg_minus_threshold)
-	return avg >= avg_threshold, avg < avg_minus_threshold
+	log.Printf("START: %f >= %f ;STOP: %f < %f", cpu_avg, cpu_avg_threshold, cpu_avg, avg_cpu_minus_threshold)
+	return cpu_avg >= cpu_avg_threshold || ram_avg >= RAM_THRESHOLD, cpu_avg < avg_cpu_minus_threshold && avg_ram_minus < RAM_THRESHOLD
 }
 
 func checkNode(node *ClusterNode) bool {
 	MASTER_THRESHOLD := 70.0
 	WORKER_THRESHOLD := 80.0
-	RAM_THRESHOLD := 75.0
+	RAM_THRESHOLD := 60.0
 	if node.IsMaster {
-		return node.CpuUsage < MASTER_THRESHOLD && node.RamUsage < RAM_THRESHOLD
+		return node.CpuUsage < MASTER_THRESHOLD && node.RamUsage <= RAM_THRESHOLD
 	} else {
-		return node.CpuUsage < WORKER_THRESHOLD && node.RamUsage < RAM_THRESHOLD
+		return node.CpuUsage < WORKER_THRESHOLD && node.RamUsage <= RAM_THRESHOLD
 	}
 }
 
 func (r *RProxy) decideBestRunningLocation() *ClusterNode {
 	nodes := make([]*ClusterNode, 0)
 	for _, node := range r.Cluster.Nodes {
-		log.Println(node)
 		if node != nil && node.Up {
 			nodes = append(nodes, node)
 		}

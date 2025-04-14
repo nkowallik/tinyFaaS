@@ -308,7 +308,7 @@ func systemWatcher(r *rproxy.RProxy) {
 		tmp := "\n"
 		for _, node := range r.Cluster.Nodes {
 			if node.Up {
-				tmp += fmt.Sprintf("%s: %f\t %f\n", node.Address, node.CpuUsage, node.RamUsage)
+				tmp += fmt.Sprintf("%s:\t %f\t %f\n", node.Address, node.CpuUsage, node.RamUsage)
 			}
 		}
 		log.Println(tmp)

@@ -33,11 +33,11 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 		}
 
 		if req.Header.Get("X-tinyFaaS-register") != "" {
-			log.Printf("Registering: %s", req.Header.Get("X-tinyFaaS-register"))
+			log.Printf("Joining request by %s", req.Header.Get("X-tinyFaaS-register"))
 			node, err := r.AddTFInstance(req.Header.Get("X-tinyFaaS-register"), req_body)
 			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
 				log.Print(err)
+				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			json.NewEncoder(w).Encode(node)
@@ -54,14 +54,12 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 				log.Print(err)
 				return
 			}
-			log.Println("Respond OK!")
-			log.Println(r.Cluster)
+			log.Printf("Joined cluster: %s", joincluster)
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		nodeAddr := req.Header.Get("X-tinyFaaS-status")
 		if nodeAddr != "" {
-			log.Printf("Updating Node Status")
 			err := r.UpdateClusterNode(nodeAddr, req_body)
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
@@ -89,6 +87,8 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 			w.WriteHeader(http.StatusNotFound)
 		case rproxy.StatusError:
 			w.WriteHeader(http.StatusInternalServerError)
+		case rproxy.StatusTooMany:
+			w.WriteHeader(http.StatusTooManyRequests)
 		}
 	})
 

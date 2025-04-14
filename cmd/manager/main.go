@@ -287,10 +287,9 @@ func (s *server) removeInstanceHandler(w http.ResponseWriter, r *http.Request) {
 
 	err = s.ms.RemoveFunctionInstance(t.Cid)
 	if err != nil {
-		log.Println("THAT DID NOT GO SO WELL")
-		panic(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		log.Fatalln(err)
 	}
-	// TODO
 }
 
 func (s *server) deleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -428,8 +427,6 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-	log.Println(ip)
-	log.Println(cid)
 	b := struct {
 		Ip  string `json:"ip"`
 		Cid string `json:"cid"`
@@ -437,17 +434,14 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		Ip:  ip,
 		Cid: cid,
 	}
-	log.Printf("Response := %s", b)
 	jsonStr, err := json.Marshal(b)
 	if err != nil {
 		log.Fatal(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	log.Printf("JSON := ", jsonStr)
 	w.WriteHeader(http.StatusAccepted)
 	w.Write(jsonStr)
-	return
 }
 
 func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {

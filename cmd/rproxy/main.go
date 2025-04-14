@@ -156,19 +156,19 @@ func main() {
 			select {
 			case <-ticker.C:
 				for name, fis := range r.Hosts {
-					for cid, fi := range fis {
-						if r.Hosts[name][cid].LastUsed.IsZero() {
+					for cid, fi := range fis.Instances {
+						if r.Hosts[name].Instances[cid].LastUsed.IsZero() {
 							log.Println("LastUsed is empty -- continuing")
 							continue
 						}
-						log.Printf("InUse: %t, Age: %f -- (%d)", fi.InUse, time.Since(fi.LastUsed).Seconds(), len(fis))
-						if r.Hosts[name][cid].InUse || time.Since(r.Hosts[name][cid].LastUsed).Seconds() < 30.0 { // TODO: make this keep-alive configurable
+						log.Printf("InUse: %t, Age: %f -- (%d)", fi.InUse, time.Since(fi.LastUsed).Seconds(), len(fis.Instances))
+						if r.Hosts[name].Instances[cid].InUse || time.Since(r.Hosts[name].Instances[cid].LastUsed).Seconds() < 30.0 { // TODO: make this keep-alive configurable
 							continue
 						}
-						if !r.Hosts[name][cid].Mu.TryLock() {
+						if !r.Hosts[name].Instances[cid].Mu.TryLock() {
 							continue
 						}
-						defer r.Hosts[name][cid].Mu.Unlock()
+						defer r.Hosts[name].Instances[cid].Mu.Unlock()
 						log.Printf("Removing container %s", fi.Cid)
 						client := &http.Client{}
 						t := struct {
@@ -199,7 +199,7 @@ func main() {
 								log.Println(resp)
 								if resp.StatusCode < 400 {
 									r.Hl.Lock()
-									delete(r.Hosts[name], fi.Cid)
+									delete(r.Hosts[name].Instances, fi.Cid)
 									r.Hl.Unlock()
 									break
 								}
@@ -268,7 +268,7 @@ func main() {
 			log.Printf("%s", err)
 		}
 	}()
-	go cpuWatcher(r)
+	go systemWatcher(r)
 
 	s := make(chan os.Signal, 1)
 
@@ -279,41 +279,45 @@ func main() {
 	log.Printf("exiting")
 }
 
-func cpuWatcher(r *rproxy.RProxy) {
-	//var count = 0
+func systemWatcher(r *rproxy.RProxy) {
 	for {
 		cmd := exec.Command("./get_cpu_usage.sh")
 		out, err := cmd.Output()
 		if err != nil {
 			log.Fatal(err)
 		}
-		usage, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 32)
+		cpu_usage, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 32)
 		if err != nil {
 			log.Fatal(err)
 		}
-		/*if !r.Cluster.Mu.TryLock() {
-			log.Println("Unable to acquire LOCK!")
-		}*/
+		cmd2 := exec.Command("./get_ram_usage.sh")
+		out2, err := cmd2.Output()
+		if err != nil {
+			log.Fatal(err)
+		}
+		ram_usage, err := strconv.ParseFloat(strings.TrimSpace(string(out2)), 32)
+		if err != nil {
+			log.Fatal(err)
+		}
 		r.Cluster.Mu.Lock()
 		node := r.Cluster.Nodes[r.Cluster.Ip]
-		node.CpuUsage = usage
+		node.CpuUsage = cpu_usage
+		node.RamUsage = ram_usage
 		r.Cluster.Nodes[r.Cluster.Ip] = node
 		r.Cluster.Mu.Unlock()
 		tmp := "\n"
 		for _, node := range r.Cluster.Nodes {
 			if node.Up {
-				tmp += fmt.Sprintf("%s: %f\n", node.Address, node.CpuUsage)
+				tmp += fmt.Sprintf("%s: %f\t %f\n", node.Address, node.CpuUsage, node.RamUsage)
 			}
 		}
 		log.Println(tmp)
 		sleepTime := 10 * time.Second
 		if r.Cluster.Worker {
 			ip := r.Cluster.Master.Address
-			msg := struct {
-				CpuUsage float64          `json:"cpuUsage"`
-				Running  map[string]int16 `json:"running"`
-			}{
+			msg := util.StatusMessage{
 				CpuUsage: r.Cluster.Nodes[ip].CpuUsage,
+				RamUsage: r.Cluster.Nodes[ip].RamUsage,
 				Running:  r.Cluster.Nodes[ip].Running,
 			}
 			jsonStr, err := json.Marshal(msg)

@@ -14,7 +14,9 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/docker"
 	"github.com/OpenFogStack/tinyFaaS/pkg/manager"
@@ -29,12 +31,21 @@ const (
 
 type server struct {
 	ms *manager.ManagementService
+	Mu *sync.Mutex
 }
 
 func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.SetPrefix("manager: ")
+
+	f, err := os.OpenFile("manager.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error creating logfile manager.log: %v", err)
+	}
+	defer f.Close()
+	wrt := io.MultiWriter(os.Stdout, f)
+	log.SetOutput(wrt)
 
 	ports := map[string]int{
 		"coap":     5683,
@@ -108,7 +119,7 @@ func main() {
 	// unpack the rproxy binary in a temporary directory
 	rProxyDir := path.Join(os.TempDir(), id)
 
-	err := os.MkdirAll(rProxyDir, 0755)
+	err = os.MkdirAll(rProxyDir, 0755)
 
 	if err != nil {
 		log.Fatal(err)
@@ -159,6 +170,7 @@ func main() {
 
 	s := &server{
 		ms: ms,
+		Mu: &sync.Mutex{},
 	}
 
 	// create handlers
@@ -418,12 +430,34 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+
+	cmd2 := exec.Command("./get_ram_usage.sh")
+	out2, err := cmd2.Output()
+	if err != nil {
+		log.Fatal(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	ram_usage, err := strconv.ParseFloat(strings.TrimSpace(string(out2)), 32)
+	if err != nil {
+		log.Fatal(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if ram_usage > 90.0 {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+
 	log.Println("got request for cold start:", d)
 
 	ip, cid, err := s.ms.NewFunctionInstance(d.Name, d.Envs)
 	if err != nil {
 		log.Println("Error in NewFunctionInstance")
 		w.WriteHeader(http.StatusInternalServerError)
+		s.ms.RemoveFunctionInstance(cid)
 		log.Println(err)
 		return
 	}
@@ -441,7 +475,16 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
-	w.Write(jsonStr)
+	_, err = w.Write(jsonStr)
+	if err != nil || r.Context().Err() != nil {
+		for {
+			err = s.ms.RemoveFunctionInstance(cid)
+			if err == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
 }
 
 func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {

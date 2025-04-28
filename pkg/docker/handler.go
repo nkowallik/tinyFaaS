@@ -223,6 +223,7 @@ func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string
 	)
 
 	if err != nil {
+		db.KillContainer(container.ID)
 		return "", err
 	}
 
@@ -236,6 +237,7 @@ func (db *DockerBackend) SpawnFunction(dh *dockerHandler, envs map[string]string
 	if dh.filePath != "" {
 		err = os.RemoveAll(dh.filePath)
 		if err != nil {
+			db.KillContainer(container.ID)
 			return "", err
 		}
 

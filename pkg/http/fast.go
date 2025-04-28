@@ -44,6 +44,10 @@ func (h *handler) ServeHTTP(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(http.StatusNotFound)
 	case rproxy.StatusError:
 		ctx.SetStatusCode(http.StatusInternalServerError)
+	case rproxy.StatusTooMany:
+		ctx.SetStatusCode(http.StatusTooManyRequests)
+	case rproxy.StatusTimeout:
+		ctx.SetStatusCode(http.StatusRequestTimeout)
 	}
 }
 

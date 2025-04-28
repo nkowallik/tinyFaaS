@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -47,6 +48,14 @@ func main() {
 		fmt.Println("Usage: ./rproxy <listen-addr> [<protocol>:<listen-addr>]")
 		os.Exit(1)
 	}
+
+	f, err := os.OpenFile("rproxy.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error creating logfile rproxy.log: %v", err)
+	}
+	defer f.Close()
+	wrt := io.MultiWriter(os.Stdout, f)
+	log.SetOutput(wrt)
 
 	rproxyListenAddress := os.Args[1]
 
@@ -170,48 +179,16 @@ func main() {
 						}
 						defer r.Hosts[name].Instances[cid].Mu.Unlock()
 						log.Printf("Removing container %s", fi.Cid)
-						client := &http.Client{}
-						t := struct {
-							Cid string
-						}{
-							Cid: fi.Cid,
-						}
-
-						jsonStr, err := json.Marshal(t)
+						err = r.StopInstance(cid, name)
 						if err != nil {
-							log.Print(err)
+							log.Println("Unable to stop instance!")
+							go r.StopInstance(cid, name)
 							continue
 						}
-						go func() {
-							counter := 0
-							for {
-								counter++
-								req, err := http.NewRequest("POST", "http://127.0.0.1:8080/rminstance", bytes.NewBuffer(jsonStr))
-								if err != nil {
-									log.Print(err)
-									continue
-								}
-								resp, err := client.Do(req)
-								if err != nil {
-									log.Print(err)
-									continue
-								}
-								log.Println(resp)
-								if resp.StatusCode < 400 {
-									r.Hl.Lock()
-									delete(r.Hosts[name].Instances, fi.Cid)
-									r.Hl.Unlock()
-									break
-								}
-								if counter > 4 {
-									log.Println("Stop trying to delete")
-									break
-								}
-							}
-						}()
 					}
 				}
 			case <-quit:
+				log.Println("STOPPING STOP_LOOP")
 				ticker.Stop()
 				return
 			}
@@ -269,6 +246,8 @@ func main() {
 		}
 	}()
 	go systemWatcher(r)
+	go r.PlanningLoop()
+	go clusterWatcher(r)
 
 	s := make(chan os.Signal, 1)
 
@@ -277,6 +256,37 @@ func main() {
 	<-s
 
 	log.Printf("exiting")
+}
+
+func clusterWatcher(r *rproxy.RProxy) {
+	for {
+		if len(r.Cluster.Nodes) < 1 {
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		r.Cluster.Mu.RLock()
+		me, ok := r.Cluster.Nodes[r.Cluster.Ip]
+		r.Cluster.Mu.RUnlock()
+		if !ok {
+			log.Println("Current node not found in cluster map")
+			continue
+		}
+		if !me.IsMaster {
+			log.Println("EXITING LOOP")
+			break
+		}
+		now := time.Now()
+		cutoff := now.Add(-10 * time.Second)
+		for key, node := range r.Cluster.Nodes {
+			if node.LastUsed.Before(cutoff) && !node.IsMaster {
+				r.Cluster.Mu.Lock()
+				delete(r.Cluster.Nodes, key)
+				r.Cluster.Mu.Unlock()
+			}
+		}
+
+		time.Sleep(10 * time.Second)
+	}
 }
 
 func systemWatcher(r *rproxy.RProxy) {
@@ -299,6 +309,7 @@ func systemWatcher(r *rproxy.RProxy) {
 		if err != nil {
 			log.Fatal(err)
 		}
+		go r.WriteUsageLog(fmt.Sprintf("%s \t%f;%f", r.Cluster.Ip, cpu_usage, ram_usage))
 		r.Cluster.Mu.Lock()
 		node := r.Cluster.Nodes[r.Cluster.Ip]
 		node.CpuUsage = cpu_usage
@@ -312,13 +323,14 @@ func systemWatcher(r *rproxy.RProxy) {
 			}
 		}
 		log.Println(tmp)
-		sleepTime := 10 * time.Second
+		// TODO: create log file containing timestamp, address, cpu and ram usage for each node
+		sleepTime := 1 * time.Second
 		if r.Cluster.Worker {
 			ip := r.Cluster.Master.Address
 			msg := util.StatusMessage{
-				CpuUsage: r.Cluster.Nodes[ip].CpuUsage,
-				RamUsage: r.Cluster.Nodes[ip].RamUsage,
-				Running:  r.Cluster.Nodes[ip].Running,
+				CpuUsage: cpu_usage,
+				RamUsage: ram_usage,
+				Running:  r.Cluster.Nodes[r.Cluster.Ip].Running,
 			}
 			jsonStr, err := json.Marshal(msg)
 			if err != nil {

@@ -89,6 +89,8 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 			w.WriteHeader(http.StatusInternalServerError)
 		case rproxy.StatusTooMany:
 			w.WriteHeader(http.StatusTooManyRequests)
+		case rproxy.StatusTimeout:
+			w.WriteHeader(http.StatusRequestTimeout)
 		}
 	})
 

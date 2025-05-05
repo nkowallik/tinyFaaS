@@ -460,7 +460,8 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-
+	//s.Mu.Lock()
+	//defer s.Mu.Unlock()
 	/*cmd2 := exec.Command("./get_ram_usage.sh")
 	out2, err := cmd2.Output()
 	if err != nil {

@@ -151,13 +151,11 @@ func main() {
 
 		log.Printf("adding %s", def.FunctionResource)
 		err = r.Add(def.FunctionResource, def.FunctionContainers)
-		log.Println("After Add")
 		if err != nil {
 			log.Fatalln("Error Adding Function", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		log.Println("Responding")
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
@@ -168,20 +166,22 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				for name, fis := range r.Hosts {
-					for cid, fi := range fis.Instances {
-						if r.Hosts[name].Instances[cid].LastUsed.Get().IsZero() {
+				for _, name := range r.Hosts.Keys() {
+					fis := r.Hosts.Get(name)
+					for _, cid := range fis.Instances.Keys() {
+						fi := fis.Instances.Get(cid)
+						if fi.LastUsed.Get().IsZero() {
 							log.Println("LastUsed is empty -- continuing")
 							continue
 						}
 						//log.Printf("InUse: %t, Age: %f -- (%d)", fi.InUse.Get(), time.Since(fi.LastUsed.Get()).Seconds(), len(fis.Instances))
-						if r.Hosts[name].Instances[cid].InUse.Get() || time.Since(r.Hosts[name].Instances[cid].LastUsed.Get()).Seconds() < 30.0 { // TODO: make this keep-alive configurable
+						if fi.InUse.Get() || time.Since(fi.LastUsed.Get()).Seconds() < 30.0 { // TODO: make this keep-alive configurable
 							continue
 						}
-						if !r.Hosts[name].Instances[cid].Mu.TryLock() {
+						if !fi.Mu.TryLock() {
 							continue
 						}
-						defer r.Hosts[name].Instances[cid].Mu.Unlock()
+						defer fi.Mu.Unlock()
 						log.Printf("Removing container %s", fi.Cid)
 						err = r.StopInstance(cid, name)
 						if err != nil {
@@ -251,7 +251,7 @@ func main() {
 	}()
 	go systemWatcher(r)
 	go r.PlanningLoop()
-	go clusterWatcher(r)
+	//go clusterWatcher(r)
 
 	s := make(chan os.Signal, 1)
 
@@ -262,7 +262,7 @@ func main() {
 	log.Printf("exiting")
 }
 
-func clusterWatcher(r *rproxy.RProxy) {
+/*func clusterWatcher(r *rproxy.RProxy) {
 	for {
 		if len(r.Cluster.Nodes.Keys()) < 1 {
 			time.Sleep(10 * time.Second)
@@ -273,10 +273,11 @@ func clusterWatcher(r *rproxy.RProxy) {
 			break
 		}
 		now := time.Now()
-		cutoff := now.Add(-10 * time.Second)
+		cutoff := now.Add(-30 * time.Second)
 		for _, key := range r.Cluster.Nodes.Keys() {
 			node := r.Cluster.Nodes.Get(key)
 			if node.LastUsed.Get().Before(cutoff) && !node.IsMaster.Get() {
+				log.Println(node)
 				log.Printf("Cluster Watcher is killing %s", key)
 				r.Cluster.Nodes.Delete(key)
 			}
@@ -284,7 +285,7 @@ func clusterWatcher(r *rproxy.RProxy) {
 
 		time.Sleep(10 * time.Second)
 	}
-}
+}*/
 
 func systemWatcher(r *rproxy.RProxy) {
 	for {
@@ -301,7 +302,7 @@ func systemWatcher(r *rproxy.RProxy) {
 			continue
 		}
 		ip := r.Cluster.Master.Address
-		if !me.IsMaster.Get() && !r.Starting.Get() && !r.Joining.Get() && r.LastActivity.Add(15*time.Second).Before(time.Now()) {
+		if !me.IsMaster.Get() && !r.Starting.Get() && !r.Joining.Get() && r.LastActivity.Add(30*time.Second).Before(time.Now()) {
 			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000", ip), bytes.NewBufferString(""))
 			if err != nil {
 				log.Println(err)

@@ -409,7 +409,7 @@ func (dh *dockerHandler) Start() error {
 	// curl http://<container>:8000/ready
 	for cid, ip := range dh.functions {
 		log.Println("waiting for container", ip, "to be ready")
-		maxRetries := 10
+		maxRetries := 20
 		for {
 			maxRetries--
 			if maxRetries == 0 {
@@ -595,4 +595,30 @@ func (dh *dockerHandler) Logs() (io.Reader, error) {
 	}
 
 	return &logs, nil
+}
+
+func (db *DockerBackend) FindTinyFaaSContainers() ([]types.Container, error) {
+	ctx := context.Background()
+	containers, err := db.client.ContainerList(ctx, container.ListOptions{All: false})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	var matchedContainers []types.Container
+
+	for _, container := range containers {
+		imageInspect, _, err := db.client.ImageInspectWithRaw(ctx, container.ImageID)
+		if err != nil {
+			// Skip this container if we can't inspect the image
+			continue
+		}
+
+		if imageInspect.Config != nil && imageInspect.Config.Labels != nil {
+			if imageInspect.Config.Labels["tinyFaaS"] == db.tinyFaaSID {
+				matchedContainers = append(matchedContainers, container)
+			}
+		}
+	}
+
+	return matchedContainers, nil
 }

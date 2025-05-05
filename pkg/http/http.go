@@ -58,6 +58,20 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
+		var leavecluster = req.Header.Get("X-tinyFaaS-leavecluster")
+		if leavecluster != "" {
+			log.Printf("Leaving cluster: %s", leavecluster)
+			err := r.LeaveCluster(leavecluster)
+			if err != nil {
+				log.Fatal("Bad Request Response", err)
+				w.WriteHeader(http.StatusBadRequest)
+				log.Print(err)
+				return
+			}
+			log.Printf("Left cluster: %s", leavecluster)
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		nodeAddr := req.Header.Get("X-tinyFaaS-status")
 		if nodeAddr != "" {
 			err := r.UpdateClusterNode(nodeAddr, req_body)

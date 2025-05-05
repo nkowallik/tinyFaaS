@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/OpenFogStack/tinyFaaS/pkg/util"
+	"github.com/docker/docker/api/types"
 	"github.com/google/uuid"
 )
 
@@ -37,6 +38,7 @@ type Backend interface {
 	ShutdownContainer(cid string)
 	StartContainerById(dh Handler, cid string) (string, error)
 	KillContainer(cid string) error
+	FindTinyFaaSContainers() ([]types.Container, error)
 	Stop() error
 }
 
@@ -385,4 +387,8 @@ func (ms *ManagementService) Stop() error {
 	}
 
 	return ms.backend.Stop()
+}
+
+func (ms *ManagementService) GetContainers() ([]types.Container, error) {
+	return ms.backend.FindTinyFaaSContainers()
 }

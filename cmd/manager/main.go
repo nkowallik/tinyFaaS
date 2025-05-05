@@ -30,8 +30,39 @@ const (
 )
 
 type server struct {
-	ms *manager.ManagementService
-	Mu *sync.Mutex
+	ms       *manager.ManagementService
+	Mu       *sync.Mutex
+	Starting SafeInt
+}
+
+type SafeInt struct {
+	mu    sync.Mutex
+	value int
+}
+
+func (i *SafeInt) Get() int {
+	i.mu.Lock()
+	me := i.value
+	i.mu.Unlock()
+	return me
+}
+
+func (i *SafeInt) Increase() {
+	i.mu.Lock()
+	i.value += 1
+	i.mu.Unlock()
+}
+
+func (i *SafeInt) Decrease() {
+	i.mu.Lock()
+	i.value -= 1
+	i.mu.Unlock()
+}
+
+func (i *SafeInt) Set(num int) {
+	i.mu.Lock()
+	i.value = num
+	i.mu.Unlock()
 }
 
 func main() {
@@ -430,10 +461,7 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.Mu.Lock()
-	defer s.Mu.Unlock()
-
-	cmd2 := exec.Command("./get_ram_usage.sh")
+	/*cmd2 := exec.Command("./get_ram_usage.sh")
 	out2, err := cmd2.Output()
 	if err != nil {
 		log.Fatal(err)
@@ -451,6 +479,20 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO:*/
+	c, err := s.ms.GetContainers()
+	if err != nil {
+		log.Fatal(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	s.Mu.Lock()
+	if len(c)+s.Starting.Get() > 19 {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	s.Starting.Increase()
+	s.Mu.Unlock()
 	log.Println("got request for cold start:", d)
 
 	ip, cid, err := s.ms.NewFunctionInstance(d.Name, d.Envs)
@@ -472,8 +514,10 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Fatal(err)
 		w.WriteHeader(http.StatusInternalServerError)
+		s.Starting.Decrease()
 		return
 	}
+
 	w.WriteHeader(http.StatusAccepted)
 	_, err = w.Write(jsonStr)
 	if err != nil || r.Context().Err() != nil {
@@ -485,6 +529,7 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(500 * time.Millisecond)
 		}
 	}
+	s.Starting.Decrease()
 }
 
 func (s *server) urlUploadHandler(w http.ResponseWriter, r *http.Request) {

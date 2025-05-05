@@ -6,7 +6,9 @@ type IpWrapper struct {
 }
 
 type StatusMessage struct {
-	CpuUsage float64          `json:"cpuUsage"`
-	RamUsage float64          `json:"ramUsage"`
-	Running  map[string]int16 `json:"running"`
+	CpuUsage        float64 `json:"cpuUsage"`
+	RamUsage        float64 `json:"ramUsage"`
+	Running         int     `json:"running"`
+	InUse           int     `json:"inuse"`
+	TooManyRequests int64   `json:"toomanyrequests"`
 }

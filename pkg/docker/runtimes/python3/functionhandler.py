@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from robyn import Robyn
+import asyncio
 
 try:
     import fn  # type: ignore
@@ -9,7 +10,7 @@ except ImportError:
 
 
 app = Robyn(__file__)
-
+inuse_lock = asyncio.Lock()
 
 @app.get("/health")
 async def health(request):
@@ -17,16 +18,29 @@ async def health(request):
     return "OK"
 
 
+@app.get("/inuse")
+async def inuse(request):
+    global inuse_lock
+    if inuse_lock.locked():
+        return "true"
+    else:
+        return "false"
+
 @app.post("/fn")
 async def run_fn(request):
+    global inuse_lock
     d = request.body
     # headers = dict(request.headers)
-    try:
-        res = fn.fn(d, None)
-        return res
-    except Exception as e:
-        print(e)
-        return str(e)
+    if inuse_lock.locked():
+        print("Function is already running")
+        return "Function is already running"
+    async with inuse_lock:
+        try:
+            res = fn.fn(d, None)
+            return res
+        except Exception as e:
+            print(e)
+            return str(e)
 
 
 app.start(host="0.0.0.0", port=8000)

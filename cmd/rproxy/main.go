@@ -174,8 +174,29 @@ func main() {
 							log.Println("LastUsed is empty -- continuing")
 							continue
 						}
-						//log.Printf("InUse: %t, Age: %f -- (%d)", fi.InUse.Get(), time.Since(fi.LastUsed.Get()).Seconds(), len(fis.Instances))
-						if fi.InUse.Get() || time.Since(fi.LastUsed.Get()).Seconds() < 30.0 { // TODO: make this keep-alive configurable
+						//log.Printf("InUse: %t, Age: %f -- (%d)", fi.InUse.Get(), time.Since(fi.LastUsed.Get()).Seconds(), len(fis.Instances.Keys()))
+						/*if fi.InUse.Get() {
+							go func(fi *rproxy.FunctionInstance) {
+								target := strings.Replace(fi.Address, "/fn", "/inuse", 1)
+								req, err := http.NewRequest("GET", target, bytes.NewBufferString(""))
+								if err != nil {
+									log.Println(err)
+								}
+
+								client := http.Client{}
+								resp, err := client.Do(req)
+								if err != nil {
+									log.Println("Unable to perform request.")
+									return
+								}
+								log.Printf("Got response: %d", resp.StatusCode)
+								buf := new(bytes.Buffer)
+								buf.ReadFrom(resp.Body)
+								response_body := buf.String()
+								log.Printf("RESPONSE: %s", response_body)
+							}(fi)
+						}*/
+						if fi.InUse.Get() || time.Since(fi.LastUsed.Get()).Seconds() < 15.0 { // TODO: make this keep-alive configurable
 							continue
 						}
 						if !fi.Mu.TryLock() {
@@ -251,6 +272,7 @@ func main() {
 	}()
 	go systemWatcher(r)
 	go r.PlanningLoop()
+	go clusterStatusWatcher(r)
 	//go clusterWatcher(r)
 
 	s := make(chan os.Signal, 1)
@@ -260,6 +282,20 @@ func main() {
 	<-s
 
 	log.Printf("exiting")
+}
+
+func clusterStatusWatcher(r *rproxy.RProxy) {
+	for {
+		if r == nil || r.Cluster == nil || r.Cluster.Nodes == nil || len(r.Cluster.Nodes.Keys()) == 0 {
+			break
+		}
+		for _, key := range r.Cluster.Nodes.Keys() {
+			node := r.Cluster.Nodes.Get(key)
+			log.Printf("%s: \t%d / %d", node.Address, node.InUse.Get(), node.Running.Get())
+			go r.WriteInstanceLog(fmt.Sprintf("%s: \t%d / %d", node.Address, node.InUse.Get(), node.Running.Get()))
+		}
+		time.Sleep(5 * time.Second)
+	}
 }
 
 /*func clusterWatcher(r *rproxy.RProxy) {
@@ -302,7 +338,7 @@ func systemWatcher(r *rproxy.RProxy) {
 			continue
 		}
 		ip := r.Cluster.Master.Address
-		if !me.IsMaster.Get() && !r.Starting.Get() && !r.Joining.Get() && r.LastActivity.Add(30*time.Second).Before(time.Now()) {
+		if !me.IsMaster.Get() && !r.Starting.Get() && !r.Joining.Get() && r.LastActivity.Add(15*time.Second).Before(time.Now()) {
 			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000", ip), bytes.NewBufferString(""))
 			if err != nil {
 				log.Println(err)

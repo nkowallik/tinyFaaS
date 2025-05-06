@@ -110,7 +110,7 @@ func (db *DockerBackend) BuildImage(name string, env string, filedir string) (ma
 	if err != nil {
 		return nil, err
 	}
-
+	log.Printf("Copying from %s to %s", filedir, path.Join(dh.filePath, "fn"))
 	err = util.CopyAll(filedir, path.Join(dh.filePath, "fn"))
 	if err != nil {
 		return nil, err

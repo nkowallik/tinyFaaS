@@ -481,15 +481,17 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO:*/
+	s.Mu.Lock()
 	c, err := s.ms.GetContainers()
 	if err != nil {
 		log.Fatal(err)
 		w.WriteHeader(http.StatusInternalServerError)
+		s.Mu.Unlock()
 		return
 	}
-	s.Mu.Lock()
 	if len(c)+s.Starting.Get() > 19 {
 		w.WriteHeader(http.StatusTooManyRequests)
+		s.Mu.Unlock()
 		return
 	}
 	s.Starting.Increase()
@@ -502,6 +504,7 @@ func (s *server) coldStartHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		s.ms.RemoveFunctionInstance(cid)
 		log.Println(err)
+		s.Starting.Decrease()
 		return
 	}
 	b := struct {

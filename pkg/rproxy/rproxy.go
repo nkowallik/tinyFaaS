@@ -152,14 +152,42 @@ func (m *SafeFunctionInstanceMap) Keys() []string {
 type Cluster struct {
 	Nodes       *SafeClusterNodeMap
 	Mu          *sync.RWMutex
-	Ip          string
+	Ip          *SafeString
 	Worker      *SafeBool
 	Master      *ClusterNode
 	Starting    *SafeBool
 	LastJoin    time.Time
 	UsageMu     *sync.Mutex
+	FnMu        *sync.Mutex
+	ClusterMu   *sync.Mutex
 	LastStop    time.Time
 	StartNodeMu *sync.Mutex
+	ForwardMu   *sync.Mutex
+}
+
+type SafeString struct {
+	mu    sync.Mutex
+	value string
+}
+
+func (s *SafeString) Set(tmp string) {
+	s.mu.Lock()
+	s.value = tmp
+	s.mu.Unlock()
+}
+
+func (s *SafeString) Get() string {
+	s.mu.Lock()
+	me := s.value
+	s.mu.Unlock()
+	return me
+}
+
+func NewSafeString(tmp string) *SafeString {
+	return &SafeString{
+		value: tmp,
+		mu:    sync.Mutex{},
+	}
 }
 
 type SafeInt struct {
@@ -229,17 +257,19 @@ func (t *SafeTime) Set(tmp time.Time) {
 }
 
 type ClusterNode struct {
-	Address         string    `json:"address"`
-	CpuUsage        float64   `json:"cpuusage"`
-	RamUsage        float64   `json:"ramusage"`
-	CpuHistory      []float64 `json:"cpuhistory"`
-	RamHistory      []float64 `json:"ramhistory"`
-	Running         *SafeInt  `json:"running"`
-	InUse           *SafeInt  `json:"used"`
-	Up              *SafeBool `json:"up"`
-	LastUsed        *SafeTime `json:"lastused"`
-	IsMaster        *SafeBool `json:"ismaster"`
-	TooManyRequests int64     `json:"toomanyrequests"`
+	Address         *SafeString `json:"address"`
+	CpuUsage        float64     `json:"cpuusage"`
+	RamUsage        float64     `json:"ramusage"`
+	CpuHistory      []float64   `json:"cpuhistory"`
+	RamHistory      []float64   `json:"ramhistory"`
+	Running         *SafeInt    `json:"running"`
+	InUse           *SafeInt    `json:"used"`
+	Requests        *SafeInt    `json:"requests"`
+	Up              *SafeBool   `json:"up"`
+	LastUsed        *SafeTime   `json:"lastused"`
+	IsMaster        *SafeBool   `json:"ismaster"`
+	TooManyRequests *SafeInt    `json:"toomanyrequests"`
+	LastUpdate      *SafeTime   `json:"lastupdate"`
 }
 
 func (c *ClusterNode) GetCpu() float64 {
@@ -266,19 +296,19 @@ type FunctionHandler struct {
 }
 
 type FunctionInstance struct {
-	Address  string
-	Cid      string
+	Address  *SafeString
+	Cid      *SafeString
 	InUse    *SafeBool
 	LastUsed *SafeTime
 	Mu       *sync.Mutex
 }
 
 type RProxy struct {
-	Hosts        SafeFunctionHandlerMap // TODO: NilPointerDereference
+	Hosts        SafeFunctionHandlerMap
 	c            *fasthttp.Client
 	Hl           sync.RWMutex
 	Cluster      *Cluster
-	LastActivity time.Time
+	LastActivity *SafeTime
 	Joining      *SafeBool
 	Starting     *SafeBool
 }
@@ -286,17 +316,18 @@ type RProxy struct {
 func New() *RProxy {
 	addr := GetOutboundIP().String()
 	node := ClusterNode{
-		Address:         addr,
+		Address:         NewSafeString(addr),
 		CpuUsage:        -1.0,
 		RamUsage:        -1.0,
 		Running:         &SafeInt{value: 0, mu: sync.Mutex{}},
 		InUse:           &SafeInt{value: 0, mu: sync.Mutex{}},
+		Requests:        &SafeInt{value: 0, mu: sync.Mutex{}},
 		CpuHistory:      make([]float64, 0),
 		RamHistory:      make([]float64, 0),
 		Up:              &SafeBool{value: true, mu: sync.Mutex{}},
 		LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 		IsMaster:        &SafeBool{value: true, mu: sync.Mutex{}},
-		TooManyRequests: 0,
+		TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
 	}
 	nodes := SafeClusterNodeMap{values: make(map[string]*ClusterNode), mu: sync.Mutex{}}
 	nodes.Put(addr, &node)
@@ -313,18 +344,21 @@ func New() *RProxy {
 		Cluster: &Cluster{
 			Nodes:       &nodes,
 			Mu:          &sync.RWMutex{},
-			Ip:          addr,
+			Ip:          NewSafeString(addr),
 			Worker:      &SafeBool{value: false, mu: sync.Mutex{}},
 			Starting:    &SafeBool{value: false, mu: sync.Mutex{}},
 			Master:      &node,
 			LastJoin:    time.Now(),
 			UsageMu:     &sync.Mutex{},
+			ClusterMu:   &sync.Mutex{},
+			FnMu:        &sync.Mutex{},
 			LastStop:    time.Now(),
 			StartNodeMu: &sync.Mutex{},
+			ForwardMu:   &sync.Mutex{},
 		},
-		Starting:     &SafeBool{value: true, mu: sync.Mutex{}},
+		Starting:     &SafeBool{value: false, mu: sync.Mutex{}},
 		Joining:      &SafeBool{value: false, mu: sync.Mutex{}},
-		LastActivity: time.Now(),
+		LastActivity: &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 	}
 }
 
@@ -340,7 +374,7 @@ func (r *RProxy) Add(name string, ips []util.IpWrapper) error {
 	for _, ip := range ips {
 		tmp := r.Hosts.Get(name)
 		if tmp != nil {
-			tmp.Instances.Put(ip.Cid, &FunctionInstance{Address: ip.Ip, Cid: ip.Cid, LastUsed: &SafeTime{value: time.Now(), mu: sync.Mutex{}}, InUse: &SafeBool{value: false, mu: sync.Mutex{}}, Mu: &sync.Mutex{}})
+			tmp.Instances.Put(ip.Cid, &FunctionInstance{Address: NewSafeString(ip.Ip), Cid: NewSafeString(ip.Cid), LastUsed: &SafeTime{value: time.Now(), mu: sync.Mutex{}}, InUse: &SafeBool{value: false, mu: sync.Mutex{}}, Mu: &sync.Mutex{}})
 		}
 	}
 
@@ -356,8 +390,8 @@ func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
 		log.Fatalln("Unable to unmarshal!", err)
 		return err
 	}
-	//r.Cluster.Mu.Lock()
-	//defer r.Cluster.Mu.Unlock()
+	r.Cluster.Mu.Lock()
+	defer r.Cluster.Mu.Unlock()
 	node := r.Cluster.Nodes.Get(nodeAddr)
 	//log.Printf("%s \t RAM: %f; CPU: %f", nodeAddr, msg.RamUsage, msg.CpuUsage)
 	go r.WriteUsageLog(fmt.Sprintf("%s \t%f;%f", nodeAddr, msg.CpuUsage, msg.RamUsage))
@@ -367,17 +401,19 @@ func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
 		ramhistory := make([]float64, 1)
 		ramhistory[0] = msg.RamUsage
 		r.Cluster.Nodes.Put(nodeAddr, &ClusterNode{
-			Address:         nodeAddr,
+			Address:         NewSafeString(nodeAddr),
 			CpuUsage:        msg.CpuUsage,
 			CpuHistory:      cpuhistory,
 			RamUsage:        msg.RamUsage,
 			RamHistory:      ramhistory,
 			Running:         &SafeInt{value: msg.Running, mu: sync.Mutex{}},
 			InUse:           &SafeInt{value: msg.InUse, mu: sync.Mutex{}},
+			Requests:        &SafeInt{value: 0, mu: sync.Mutex{}},
 			Up:              &SafeBool{value: true, mu: sync.Mutex{}},
 			LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 			IsMaster:        &SafeBool{value: false, mu: sync.Mutex{}},
-			TooManyRequests: 0,
+			TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
+			LastUpdate:      &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 		})
 	} else {
 		node.CpuUsage = msg.CpuUsage
@@ -393,15 +429,31 @@ func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
 		node.Up.Set(true)
 		node.Running.Set(msg.Running)
 		node.InUse.Set(msg.InUse)
-		node.TooManyRequests = msg.TooManyRequests
+		node.TooManyRequests = &SafeInt{value: msg.TooManyRequests, mu: sync.Mutex{}}
+		node.LastUpdate.Set(time.Now())
 		r.Cluster.Nodes.Put(nodeAddr, node)
 	}
 	return nil
 }
 
-func (r *RProxy) AddTFInstance(ip string, body []byte) (ClusterNode, error) {
+func GetClusterNodeMessage(node *ClusterNode) util.ClusterNodeMessage {
+	return util.ClusterNodeMessage{
+		Address:         node.Address.Get(),
+		CpuUsage:        node.CpuUsage,
+		RamUsage:        node.RamUsage,
+		Running:         node.Running.Get(),
+		InUse:           node.InUse.Get(),
+		Requests:        node.Requests.Get(),
+		Up:              node.Up.Get(),
+		LastUsed:        node.LastUsed.Get(),
+		IsMaster:        node.IsMaster.Get(),
+		TooManyRequests: node.TooManyRequests.Get(),
+	}
+}
+
+func (r *RProxy) AddTFInstance(ip string, body []byte) (util.ClusterNodeMessage, error) {
 	if ip == "" {
-		return ClusterNode{}, fmt.Errorf("no empty instances")
+		return util.ClusterNodeMessage{}, fmt.Errorf("no empty instances")
 	}
 
 	msg := util.StatusMessage{}
@@ -414,18 +466,20 @@ func (r *RProxy) AddTFInstance(ip string, body []byte) (ClusterNode, error) {
 	r.Cluster.Mu.Lock()
 	defer r.Cluster.Mu.Unlock()
 	r.Cluster.Nodes.Put(ip, &ClusterNode{
-		Address:  ip,
-		CpuUsage: msg.CpuUsage,
-		RamUsage: msg.RamUsage,
-		Running:  &SafeInt{value: 0, mu: sync.Mutex{}},
-		InUse:    &SafeInt{value: 0, mu: sync.Mutex{}},
-		Up:       &SafeBool{value: true, mu: sync.Mutex{}},
-		LastUsed: &SafeTime{value: time.Now(), mu: sync.Mutex{}},
-		IsMaster: &SafeBool{value: false, mu: sync.Mutex{}},
+		Address:         NewSafeString(ip),
+		CpuUsage:        msg.CpuUsage,
+		RamUsage:        msg.RamUsage,
+		Running:         &SafeInt{value: 0, mu: sync.Mutex{}},
+		InUse:           &SafeInt{value: 0, mu: sync.Mutex{}},
+		Requests:        &SafeInt{value: 0, mu: sync.Mutex{}},
+		Up:              &SafeBool{value: true, mu: sync.Mutex{}},
+		LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
+		IsMaster:        &SafeBool{value: false, mu: sync.Mutex{}},
+		TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
 	})
 	r.Cluster.LastJoin = time.Now()
 	r.Cluster.Starting.Set(false)
-	return *r.Cluster.Master, nil
+	return GetClusterNodeMessage(r.Cluster.Master), nil
 }
 
 func (r *RProxy) GetIP() string {
@@ -454,7 +508,7 @@ func (r *RProxy) LeaveCluster(addr string) error {
 func (r *RProxy) RegisterInCluster(addr string) error {
 	r.Joining.Set(true)
 	log.Printf("Registering in Custer %s", addr)
-	outboundIp := r.Cluster.Ip
+	outboundIp := r.Cluster.Ip.Get()
 	me := r.Cluster.Nodes.Get(outboundIp)
 	if me == nil {
 		return fmt.Errorf("unable to find myself in cluster nodes")
@@ -494,7 +548,7 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 		log.Println("Unable to read body")
 		panic(err)
 	}
-	tmp := ClusterNode{}
+	tmp := util.ClusterNodeMessage{}
 	err = json.Unmarshal(resp_body, &tmp)
 	if err != nil {
 		log.Println("Unable to unpack ")
@@ -502,9 +556,23 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 	}
 	r.Cluster.Mu.Lock()
 	defer r.Cluster.Mu.Unlock()
+	newNode := &ClusterNode{
+		Address:         NewSafeString(tmp.Address),
+		CpuUsage:        tmp.CpuUsage,
+		CpuHistory:      tmp.CpuHistory,
+		RamUsage:        tmp.RamUsage,
+		RamHistory:      tmp.RamHistory,
+		Running:         &SafeInt{value: tmp.Running, mu: sync.Mutex{}},
+		InUse:           &SafeInt{value: tmp.InUse, mu: sync.Mutex{}},
+		Requests:        &SafeInt{value: 0, mu: sync.Mutex{}},
+		Up:              &SafeBool{value: true, mu: sync.Mutex{}},
+		LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
+		IsMaster:        &SafeBool{value: true, mu: sync.Mutex{}},
+		TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
+	}
 	r.Cluster.Master.IsMaster.Set(false)
-	r.Cluster.Nodes.Put(r.Cluster.Master.Address, r.Cluster.Master)
-	r.Cluster.Nodes.Put(tmp.Address, &tmp)
+	r.Cluster.Nodes.Put(r.Cluster.Master.Address.Get(), r.Cluster.Master)
+	r.Cluster.Nodes.Put(tmp.Address, newNode)
 	r.Cluster.Master = r.Cluster.Nodes.Get(tmp.Address)
 	r.Cluster.Worker.Set(true)
 	r.Joining.Set(false)
@@ -574,7 +642,6 @@ func (r *RProxy) StopInstance(cid string, name string) error {
 }
 
 func (r *RProxy) spawnNewInstance(name string, headers map[string]string) (string, string, error) {
-	r.LastActivity = time.Now()
 	target := r.Hosts.Get(name)
 	if target == nil {
 		return "", "", fmt.Errorf("unable to find FunctionHandler for name %s", name)
@@ -621,7 +688,7 @@ func (r *RProxy) spawnNewInstance(name string, headers map[string]string) (strin
 	if resp.StatusCode() == 429 {
 		log.Println("Host is at capacity. Unable to start function instance.")
 		target.Starting.Decrease()
-		return "", "", fmt.Errorf("host is at capacity")
+		return "", "", fmt.Errorf("at capacity")
 	}
 
 	log.Println(resp.StatusCode())
@@ -653,7 +720,7 @@ func (r *RProxy) startNextNode() {
 	if !r.Cluster.Starting.Get() && r.Cluster.StartNodeMu.TryLock() {
 		r.Cluster.Starting.Set(true)
 	} else {
-		log.Println("Already adding node.")
+		log.Println("Starting Node.")
 		return
 	}
 	cmd := exec.Command("./start_node.sh")
@@ -679,12 +746,16 @@ func (r *RProxy) stopNextNode(addr string) {
 }
 
 func planRessources(nodes []*ClusterNode) bool {
+	var tooManyRequests = 0
 	for _, node := range nodes {
-		if node.InUse.Get() < 19 && int(node.TooManyRequests) < 2 {
-			node.TooManyRequests = 0
+		tooManyRequests += node.TooManyRequests.Get()
+		node.TooManyRequests.Set(0)
+		if node.InUse.Get() < 15 && node.LastUpdate.Get().After(time.Now().Add(-5*time.Second)) {
 			return false
 		}
-		node.TooManyRequests = 0
+	}
+	if tooManyRequests < 2 {
+		return false
 	}
 	return true
 	/*MASTER_CPU_THRESHOLD := 70.0
@@ -726,7 +797,7 @@ func checkNode(node *ClusterNode) bool {
 	//RAM_THRESHOLD := 80.0
 	//return node.GetCpu() < WORKER_THRESHOLD && node.GetRam() <= RAM_THRESHOLD
 	//log.Printf("%s: %d/%d", node.Address, node.InUse.Get(), node.Running.Get())
-	return node.InUse.Get() < node.Running.Get() || node.Running.Get() < 19
+	return (node.InUse.Get()+node.Requests.Get() < node.Running.Get() || node.Running.Get() < 19) && node.Requests.Get() < 19
 }
 
 func (r *RProxy) WriteUsageLog(text string) {
@@ -747,8 +818,8 @@ func (r *RProxy) WriteUsageLog(text string) {
 
 func (r *RProxy) WriteClusterLog(text string) {
 	ts := time.Now().Format("15:04:05.123456")
-	r.Cluster.UsageMu.Lock()
-	defer r.Cluster.UsageMu.Unlock()
+	r.Cluster.ClusterMu.Lock()
+	defer r.Cluster.ClusterMu.Unlock()
 	f, err := os.OpenFile("/home/pi/cluster_scheduling.log", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		log.Fatalln(err)
@@ -757,6 +828,21 @@ func (r *RProxy) WriteClusterLog(text string) {
 	defer f.Close()
 
 	if _, err = f.WriteString(fmt.Sprintf("%s %s\n", ts, text)); err != nil {
+		log.Fatalln(err)
+	}
+}
+
+func (r *RProxy) WriteFnLog(name string, ts1 string, ts2 string) {
+	r.Cluster.FnMu.Lock()
+	defer r.Cluster.FnMu.Unlock()
+	f, err := os.OpenFile("/home/pi/fn_invocations.log", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	defer f.Close()
+
+	if _, err = f.WriteString(fmt.Sprintf("%s, %s, %s\n", name, ts1, ts2)); err != nil {
 		log.Fatalln(err)
 	}
 }
@@ -819,11 +905,11 @@ func (r *RProxy) decideBestRunningLocation() *ClusterNode {
 
 func (r *RProxy) forwardCall(name string, payload []byte, chosenNode *ClusterNode) (Status, []byte) {
 	//me := r.Cluster.Nodes.Get(r.GetIP())
-	log.Printf("Forwarding call to %s", chosenNode.Address)
+	log.Printf("Forwarding call to %s", chosenNode.Address.Get())
 	chosenNode.LastUsed.Set(time.Now())
 	go func() {
 		req := &fasthttp.Request{}
-		req.SetRequestURI(fmt.Sprintf("http://%s:8000/%s", chosenNode.Address, name))
+		req.SetRequestURI(fmt.Sprintf("http://%s:8000/%s", chosenNode.Address.Get(), name))
 		req.Header.SetMethod(fasthttp.MethodPost)
 		req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
 		req.SetBodyRaw(payload)
@@ -838,6 +924,7 @@ func (r *RProxy) forwardCall(name string, payload []byte, chosenNode *ClusterNod
 				log.Println("Node unreachable, marking node as Down.")
 				chosenNode.Up.Set(false)
 			}*/
+			chosenNode.Requests.Decrease()
 			return
 		}
 
@@ -845,6 +932,7 @@ func (r *RProxy) forwardCall(name string, payload []byte, chosenNode *ClusterNod
 
 		log.Printf("handler returned status code: %d", statusCode)
 		chosenNode.LastUsed.Set(time.Now())
+		chosenNode.Requests.Decrease()
 		//r.Cluster.Nodes.Put(r.Cluster.Ip, chosenNode)
 	}()
 
@@ -852,7 +940,7 @@ func (r *RProxy) forwardCall(name string, payload []byte, chosenNode *ClusterNod
 }
 
 func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[string]string) (Status, []byte) {
-	r.LastActivity = time.Now()
+	r.LastActivity.Set(time.Now())
 	myIp := r.GetIP()
 	tmp := r.Cluster.Nodes.Get(myIp)
 	if tmp == nil {
@@ -883,33 +971,39 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 		if cand.Mu.TryLock() {
 			cand.InUse.Set(true)
 			me.InUse.Increase()
-			freeCid = cand.Cid
+			freeCid = cand.Cid.Get()
 			break
 		}
 	}
 	if freeCid == "" {
 		if me.Running.Get() < 19 {
 			ip, cid, err := r.spawnNewInstance(name, headers)
-			if err != nil {
+			if err != nil && err.Error() == "at capacity" {
+				me.TooManyRequests.Increase()
+				return StatusTooMany, nil
+			}
+			if err != nil && err.Error() != "at capacity" {
 				return StatusError, nil
 			}
-			t := &FunctionInstance{Address: fmt.Sprintf("http://%s:8000/fn", ip), Cid: cid, InUse: &SafeBool{value: false, mu: sync.Mutex{}}, Mu: &sync.Mutex{}, LastUsed: &SafeTime{value: time.Now(), mu: sync.Mutex{}}}
+			t := &FunctionInstance{Address: NewSafeString(fmt.Sprintf("http://%s:8000/fn", ip)), Cid: NewSafeString(cid), InUse: &SafeBool{value: false, mu: sync.Mutex{}}, Mu: &sync.Mutex{}, LastUsed: &SafeTime{value: time.Now(), mu: sync.Mutex{}}}
 			host.Instances.Put(cid, t)
 		}
 		var chosenNode *ClusterNode = &me
 		if freeCid == "" && me.IsMaster.Get() {
 			chosenNode = r.decideBestRunningLocation()
 			if chosenNode == nil {
-				go r.startNextNode()
+				//go r.startNextNode()
 				//log.Println("Resource scarcity. Unable to schedule. Scheduling New worker node.")
+				me.TooManyRequests.Increase()
 				return StatusTooMany, nil
 			}
 			if chosenNode.Address != me.Address {
+				chosenNode.Requests.Increase()
 				return r.forwardCall(name, payload, chosenNode)
 			}
 		}
 
-		me.TooManyRequests += 1
+		me.TooManyRequests.Increase()
 		return StatusTooMany, nil
 	}
 	instance := host.Instances.Get(freeCid)
@@ -918,12 +1012,13 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 		return StatusError, nil
 	}
 	me.LastUsed.Set(time.Now())
-	log.Printf("chosen handler: %s", instance.Address)
+	log.Printf("chosen handler: %s", instance.Address.Get())
 	go func(FnsInUse *SafeInt, InUse *SafeBool, mu *sync.Mutex, t *SafeTime) {
 		defer mu.Unlock()
+		ts1 := time.Now().Format("15:04:05.123456")
 		req := &fasthttp.Request{}
 		instance.LastUsed.Set(time.Now())
-		req.SetRequestURI(instance.Address)
+		req.SetRequestURI(instance.Address.Get())
 		req.Header.SetMethod(fasthttp.MethodPost)
 		req.Header.SetContentTypeBytes([]byte("application/octet-stream"))
 		req.SetBodyRaw(payload)
@@ -944,6 +1039,8 @@ func (r *RProxy) fastCall(name string, payload []byte, async bool, headers map[s
 		InUse.Set(false)
 		t.Set(time.Now())
 		instance.LastUsed.Set(time.Now())
+		ts2 := time.Now().Format("15:04:05.123456")
+		go r.WriteFnLog(name, ts1, ts2)
 	}(me.InUse, instance.InUse, instance.Mu, tmp.LastUsed)
 
 	return StatusOK, []byte("Ok")
@@ -966,9 +1063,9 @@ func (r *RProxy) normalCall(name string, payload []byte, async bool, headers map
 		}
 	}
 
-	log.Printf("chosen handler: %s", h.Address)
+	log.Printf("chosen handler: %s", h.Address.Get())
 
-	req, err := http.NewRequest("POST", h.Address, bytes.NewBuffer(payload))
+	req, err := http.NewRequest("POST", h.Address.Get(), bytes.NewBuffer(payload))
 
 	if err != nil {
 		log.Print(err)

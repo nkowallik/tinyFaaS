@@ -80,7 +80,7 @@ func Start(r *rproxy.RProxy, listenAddr string) {
 				log.Print(err)
 				return
 			}
-			w.WriteHeader(http.StatusAccepted)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 

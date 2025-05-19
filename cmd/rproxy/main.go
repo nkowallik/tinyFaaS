@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -84,7 +86,7 @@ func main() {
 	go func() {
 		time.Sleep(1 * time.Minute)
 		r.Starting.Set(false)
-		r.LastActivity = time.Now()
+		r.LastActivity.Set(time.Now())
 	}()
 	// CoAP
 	if listenAddr, ok := listenAddrs["coap"]; ok {
@@ -203,7 +205,7 @@ func main() {
 							continue
 						}
 						defer fi.Mu.Unlock()
-						log.Printf("Removing container %s", fi.Cid)
+						log.Printf("Removing container %s", fi.Cid.Get())
 						err = r.StopInstance(cid, name)
 						if err != nil {
 							log.Println("Unable to stop instance!")
@@ -289,12 +291,21 @@ func clusterStatusWatcher(r *rproxy.RProxy) {
 		if r == nil || r.Cluster == nil || r.Cluster.Nodes == nil || len(r.Cluster.Nodes.Keys()) == 0 {
 			break
 		}
-		for _, key := range r.Cluster.Nodes.Keys() {
-			node := r.Cluster.Nodes.Get(key)
-			log.Printf("%s: \t%d / %d", node.Address, node.InUse.Get(), node.Running.Get())
-			go r.WriteInstanceLog(fmt.Sprintf("%s: \t%d / %d", node.Address, node.InUse.Get(), node.Running.Get()))
+		nodes := make([]*rproxy.ClusterNode, len(r.Cluster.Nodes.Keys()))
+		for i, key := range r.Cluster.Nodes.Keys() {
+			nodes[i] = r.Cluster.Nodes.Get(key)
 		}
-		time.Sleep(5 * time.Second)
+
+		sort.Slice(nodes, func(i, j int) bool { // sort by cpu usage descending
+			return nodes[i].InUse.Get() > nodes[j].InUse.Get()
+		})
+
+		for _, node := range nodes {
+			log.Printf("%s: \t%d / %d", node.Address.Get(), node.InUse.Get(), node.Running.Get())
+			go r.WriteInstanceLog(fmt.Sprintf("%s: \t%d / %d", node.Address.Get(), node.InUse.Get(), node.Running.Get()))
+		}
+
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -326,7 +337,7 @@ func clusterStatusWatcher(r *rproxy.RProxy) {
 func systemWatcher(r *rproxy.RProxy) {
 	for {
 		if r == nil {
-			time.Sleep(2 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		tip := r.GetIP()
@@ -334,29 +345,34 @@ func systemWatcher(r *rproxy.RProxy) {
 		if me == nil {
 			log.Printf("%s not in cluster", tip)
 			log.Println(r.Cluster.Nodes)
-			time.Sleep(2 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
-		ip := r.Cluster.Master.Address
-		if !me.IsMaster.Get() && !r.Starting.Get() && !r.Joining.Get() && r.LastActivity.Add(15*time.Second).Before(time.Now()) {
-			req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000", ip), bytes.NewBufferString(""))
-			if err != nil {
-				log.Println(err)
-			}
-			req.Header.Set("X-tinyFaaS-leavecluster", me.Address)
+		ip := r.Cluster.Master.Address.Get()
+		if _, err := os.Stat("./alwayson"); err == nil {
+			log.Println("Skipping leave cluster check")
+		} else if errors.Is(err, os.ErrNotExist) {
+			if !me.IsMaster.Get() && !r.Starting.Get() && !r.Joining.Get() && r.LastActivity.Get().Add(30*time.Second).Before(time.Now()) && me.InUse.Get() == 0 {
+				req, err := http.NewRequest("POST", fmt.Sprintf("http://%s:8000", ip), bytes.NewBufferString(""))
+				if err != nil {
+					log.Println(err)
+				}
+				req.Header.Set("X-tinyFaaS-leavecluster", me.Address.Get())
 
-			client := http.Client{}
-			resp, err := client.Do(req)
-			if err != nil {
-				log.Println("Unable to perform request.")
-				continue
-			}
-			log.Printf("Requested Cluster Leave: http://%s:8000", ip)
-			log.Printf("Got response: %d", resp.StatusCode)
-			if resp.StatusCode < 400 {
-				break
+				client := http.Client{}
+				resp, err := client.Do(req)
+				if err != nil {
+					log.Println("Unable to perform request.")
+					continue
+				}
+				log.Printf("Requested Cluster Leave: http://%s:8000", ip)
+				log.Printf("Got response: %d", resp.StatusCode)
+				if resp.StatusCode < 400 {
+					break
+				}
 			}
 		}
+
 		cmd := exec.Command("./get_cpu_usage.sh")
 		out, err := cmd.Output()
 		if err != nil {
@@ -375,11 +391,11 @@ func systemWatcher(r *rproxy.RProxy) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		go r.WriteUsageLog(fmt.Sprintf("%s \t%f;%f", r.Cluster.Ip, cpu_usage, ram_usage))
+		go r.WriteUsageLog(fmt.Sprintf("%s \t%f;%f", r.Cluster.Ip.Get(), cpu_usage, ram_usage))
 		r.Cluster.Mu.Lock()
-		node := r.Cluster.Nodes.Get(r.Cluster.Ip)
+		node := r.Cluster.Nodes.Get(r.Cluster.Ip.Get())
 		if node == nil {
-			time.Sleep(2 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		node.CpuUsage = cpu_usage
@@ -392,7 +408,7 @@ func systemWatcher(r *rproxy.RProxy) {
 		for len(node.RamHistory) > 10 {
 			node.RamHistory = node.RamHistory[1:]
 		}
-		r.Cluster.Nodes.Put(r.Cluster.Ip, node)
+		r.Cluster.Nodes.Put(r.Cluster.Ip.Get(), node)
 		r.Cluster.Mu.Unlock()
 		/*tmp := "\n"
 		for _, node := range r.Cluster.Nodes {
@@ -402,14 +418,15 @@ func systemWatcher(r *rproxy.RProxy) {
 		}
 		log.Println(tmp)*/
 		// TODO: create log file containing timestamp, address, cpu and ram usage for each node
-		sleepTime := 1 * time.Second
+		sleepTime := 500 * time.Millisecond
 		if r.Cluster.Worker.Get() {
+			log.Println("Sending Update To Leader")
 			msg := util.StatusMessage{
 				CpuUsage:        cpu_usage,
 				RamUsage:        ram_usage,
 				Running:         me.Running.Get(),
 				InUse:           me.InUse.Get(),
-				TooManyRequests: me.TooManyRequests,
+				TooManyRequests: me.TooManyRequests.Get(),
 			}
 			jsonStr, err := json.Marshal(msg)
 			if err != nil {
@@ -420,8 +437,7 @@ func systemWatcher(r *rproxy.RProxy) {
 			if err != nil {
 				log.Println(err)
 			}
-			req.Header.Set("X-tinyFaaS-status", r.Cluster.Ip)
-
+			req.Header.Set("X-tinyFaaS-status", r.Cluster.Ip.Get())
 			client := http.Client{}
 			resp, err := client.Do(req)
 			if err != nil {
@@ -431,8 +447,8 @@ func systemWatcher(r *rproxy.RProxy) {
 			}
 			log.Printf("Requested: http://%s:8000", ip)
 			log.Printf("Got response: %d", resp.StatusCode)
-			me.TooManyRequests = 0
+			me.TooManyRequests.Set(0)
 		}
-		time.Sleep(sleepTime) // TODO: adapt sleep time
+		time.Sleep(sleepTime)
 	}
 }

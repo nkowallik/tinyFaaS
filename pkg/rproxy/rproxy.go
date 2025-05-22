@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -155,7 +156,7 @@ type Cluster struct {
 	Ip          *SafeString
 	Worker      *SafeBool
 	Master      *ClusterNode
-	Starting    *SafeBool
+	Starting    *SafeString
 	LastJoin    time.Time
 	UsageMu     *sync.Mutex
 	FnMu        *sync.Mutex
@@ -328,6 +329,7 @@ func New() *RProxy {
 		LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 		IsMaster:        &SafeBool{value: true, mu: sync.Mutex{}},
 		TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
+		LastUpdate:      &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 	}
 	nodes := SafeClusterNodeMap{values: make(map[string]*ClusterNode), mu: sync.Mutex{}}
 	nodes.Put(addr, &node)
@@ -346,7 +348,7 @@ func New() *RProxy {
 			Mu:          &sync.RWMutex{},
 			Ip:          NewSafeString(addr),
 			Worker:      &SafeBool{value: false, mu: sync.Mutex{}},
-			Starting:    &SafeBool{value: false, mu: sync.Mutex{}},
+			Starting:    &SafeString{value: "", mu: sync.Mutex{}},
 			Master:      &node,
 			LastJoin:    time.Now(),
 			UsageMu:     &sync.Mutex{},
@@ -412,7 +414,7 @@ func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
 			Up:              &SafeBool{value: true, mu: sync.Mutex{}},
 			LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 			IsMaster:        &SafeBool{value: false, mu: sync.Mutex{}},
-			TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
+			TooManyRequests: &SafeInt{value: msg.TooManyRequests, mu: sync.Mutex{}},
 			LastUpdate:      &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 		})
 	} else {
@@ -429,7 +431,7 @@ func (r *RProxy) UpdateClusterNode(nodeAddr string, values []byte) error {
 		node.Up.Set(true)
 		node.Running.Set(msg.Running)
 		node.InUse.Set(msg.InUse)
-		node.TooManyRequests = &SafeInt{value: msg.TooManyRequests, mu: sync.Mutex{}}
+		node.TooManyRequests.Set(msg.TooManyRequests)
 		node.LastUpdate.Set(time.Now())
 		r.Cluster.Nodes.Put(nodeAddr, node)
 	}
@@ -476,9 +478,11 @@ func (r *RProxy) AddTFInstance(ip string, body []byte) (util.ClusterNodeMessage,
 		LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 		IsMaster:        &SafeBool{value: false, mu: sync.Mutex{}},
 		TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
+		LastUpdate:      &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 	})
 	r.Cluster.LastJoin = time.Now()
-	r.Cluster.Starting.Set(false)
+	r.Cluster.Starting.Set("")
+	log.Println("Joined. Not starting anymore.")
 	return GetClusterNodeMessage(r.Cluster.Master), nil
 }
 
@@ -500,6 +504,13 @@ func GetOutboundIP() net.IP {
 
 func (r *RProxy) LeaveCluster(addr string) error {
 	log.Printf("%s is leaving the cluster", addr)
+	starting := r.Cluster.Starting.Get()
+	if strings.Trim(starting, "\n") == strings.Trim(addr, "\n") {
+		r.Cluster.Starting.Set("")
+		log.Println("Not starting anymore.")
+	} else {
+		log.Printf("Leaving node is not marked starting: '%s' vs. '%s'", addr, starting)
+	}
 	r.Cluster.Nodes.Delete(addr)
 	r.stopNextNode(addr)
 	return nil
@@ -569,6 +580,7 @@ func (r *RProxy) RegisterInCluster(addr string) error {
 		LastUsed:        &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 		IsMaster:        &SafeBool{value: true, mu: sync.Mutex{}},
 		TooManyRequests: &SafeInt{value: 0, mu: sync.Mutex{}},
+		LastUpdate:      &SafeTime{value: time.Now(), mu: sync.Mutex{}},
 	}
 	r.Cluster.Master.IsMaster.Set(false)
 	r.Cluster.Nodes.Put(r.Cluster.Master.Address.Get(), r.Cluster.Master)
@@ -717,20 +729,28 @@ func (r *RProxy) spawnNewInstance(name string, headers map[string]string) (strin
 }
 
 func (r *RProxy) startNextNode() {
-	if !r.Cluster.Starting.Get() && r.Cluster.StartNodeMu.TryLock() {
-		r.Cluster.Starting.Set(true)
+	starting := r.Cluster.Starting.Get()
+	if starting != "" {
+		log.Printf("Node already marked starting: '%s'", starting)
+		return
+	}
+	if r.Cluster.StartNodeMu.TryLock() {
+		cmd := exec.Command("./start_node.sh")
+		out, err := cmd.Output()
+		if err != nil {
+			log.Println(err)
+			log.Println(out)
+		}
+		addr := strings.Trim(string(out), "\n")
+		if !strings.Contains(addr, "All nodes are") {
+			r.Cluster.Starting.Set(addr)
+			r.WriteClusterLog(fmt.Sprintf("Starting node %s", addr))
+		}
+		r.Cluster.StartNodeMu.Unlock()
 	} else {
 		log.Println("Starting Node.")
 		return
 	}
-	cmd := exec.Command("./start_node.sh")
-	out, err := cmd.Output()
-	if err != nil {
-		log.Print(err)
-	}
-	addr := string(out)
-	r.WriteClusterLog(fmt.Sprintf("Starting node %s", addr))
-	r.Cluster.StartNodeMu.Unlock()
 }
 
 func (r *RProxy) stopNextNode(addr string) {
@@ -745,12 +765,16 @@ func (r *RProxy) stopNextNode(addr string) {
 	go r.WriteClusterLog(fmt.Sprintf("Stopping node %s", addr))
 }
 
-func planRessources(nodes []*ClusterNode) bool {
+func planRessources(nodes []*ClusterNode, me *ClusterNode) bool {
+	myIp := me.Address.Get()
 	var tooManyRequests = 0
 	for _, node := range nodes {
 		tooManyRequests += node.TooManyRequests.Get()
 		node.TooManyRequests.Set(0)
-		if node.InUse.Get() < 15 && node.LastUpdate.Get().After(time.Now().Add(-5*time.Second)) {
+	}
+
+	for _, node := range nodes {
+		if node.InUse.Get() < 15 && (node.Address.Get() == myIp || node.LastUpdate.Get().After(time.Now().Add(-5*time.Second))) {
 			return false
 		}
 	}
@@ -864,6 +888,7 @@ func (r *RProxy) WriteInstanceLog(text string) {
 }
 
 func (r *RProxy) PlanningLoop() {
+	me := r.Cluster.Nodes.Get(r.GetIP())
 	for {
 		nodes := make([]*ClusterNode, 0)
 		for _, key := range r.Cluster.Nodes.Keys() {
@@ -873,7 +898,7 @@ func (r *RProxy) PlanningLoop() {
 			}
 		}
 
-		if planRessources(nodes) {
+		if planRessources(nodes, me) {
 			r.startNextNode()
 		}
 		/* else if stop && !r.Cluster.Starting && time.Now().After(r.Cluster.LastJoin.Add(20*time.Second)) {
@@ -916,10 +941,14 @@ func (r *RProxy) forwardCall(name string, payload []byte, chosenNode *ClusterNod
 
 		resp := &fasthttp.Response{}
 
-		err := r.c.DoTimeout(req, resp, 20*time.Second)
+		err := r.c.DoTimeout(req, resp, 30*time.Second)
 
 		if err != nil {
 			log.Println(err)
+			if strings.Contains(err.Error(), "no route to host") {
+				addr := chosenNode.Address.Get()
+				r.LeaveCluster(addr)
+			}
 			/*if me.Address != chosenNode.Address {
 				log.Println("Node unreachable, marking node as Down.")
 				chosenNode.Up.Set(false)

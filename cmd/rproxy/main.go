@@ -301,7 +301,7 @@ func clusterStatusWatcher(r *rproxy.RProxy) {
 		})
 
 		for _, node := range nodes {
-			log.Printf("%s: \t%d / %d", node.Address.Get(), node.InUse.Get(), node.Running.Get())
+			log.Printf("%s: \t%d / %d \t(%s)", node.Address.Get(), node.InUse.Get(), node.Running.Get(), r.Cluster.Starting.Get())
 			go r.WriteInstanceLog(fmt.Sprintf("%s: \t%d / %d", node.Address.Get(), node.InUse.Get(), node.Running.Get()))
 		}
 
@@ -447,7 +447,9 @@ func systemWatcher(r *rproxy.RProxy) {
 			}
 			log.Printf("Requested: http://%s:8000", ip)
 			log.Printf("Got response: %d", resp.StatusCode)
-			me.TooManyRequests.Set(0)
+			if resp.StatusCode < 400 {
+				me.TooManyRequests.Set(0)
+			}
 		}
 		time.Sleep(sleepTime)
 	}
